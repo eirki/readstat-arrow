@@ -1,0 +1,133 @@
+"""The Metadata container: its mappings, editing them, and its repr."""
+
+from __future__ import annotations
+
+import io
+from dataclasses import replace
+from pathlib import Path
+from textwrap import dedent
+
+import pyarrow as pa
+import pytest
+
+import readstat_arrow
+from readstat_arrow import Code, Metadata
+
+DATA_DIR = Path(__file__).parent / "data"
+
+
+def test_mappings_hold_only_what_the_file_declares() -> None:
+    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+
+    assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
+    assert meta.variable_labels["mychar"] == "character"
+    assert meta.value_labels == {
+        "mylabl": [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}],
+        "myord": [
+            {"value": 1.0, "label": "low"},
+            {"value": 2.0, "label": "medium"},
+            {"value": 3.0, "label": "high"},
+        ],
+    }
+    assert "mychar" not in meta.value_labels  # ... and an undeclared name is simply absent
+
+
+def test_describing_a_variable_is_ordinary_dictionary_work() -> None:
+    meta = Metadata()
+    meta.variable_labels["agree"] = "Agrees with statement"
+    meta.value_labels["agree"] = [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]
+
+    assert meta.variable_labels == {"agree": "Agrees with statement"}
+    assert meta.value_labels == {"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]}
+
+
+def test_merge() -> None:
+    _, _sav_schema, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    _, other_schema, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
+    # Give the second file distinct variable names, as if it were another block of columns.
+    other = _rename_all(other, other_schema.names, suffix="_b")
+
+    merged = sav.merge(other)
+
+    assert merged.notes == [*sav.notes, *other.notes]
+    assert merged.file_label == sav.file_label
+    # Every variable keeps its own labels; nothing to reconcile between the files.
+    assert merged.value_labels["mylabl"] == sav.value_labels["mylabl"]
+    assert merged.value_labels["mylabl_b"] == other.value_labels["mylabl_b"]
+    assert merged.missing_values["myord_b"] == {"values": [-1.0, -2.0, -3.0]}
+
+
+def test_merge_prefers_self_on_overlap() -> None:
+    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    labels: dict[str, str | None] = {name: "other" for name in schema.names}
+    labels["extra"] = "Extra"
+    other = replace(meta, variable_labels=labels)
+
+    merged = meta.merge(other)
+
+    assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
+    assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
+    assert meta.merge(meta) == replace(meta, notes=[*meta.notes, *meta.notes])
+
+
+def test_variables_do_not_share_label_lists() -> None:
+    """Variables that share one label set in the file come back with independent lists."""
+    codes: list[Code] = [{"value": 1, "label": "Yes"}, {"value": 2, "label": "No"}]
+    meta = Metadata(value_labels={"q1": codes, "q2": codes})
+    table = pa.table({"q1": pa.array([1], pa.int8()), "q2": pa.array([2], pa.int8())})
+    shared = io.BytesIO()
+    readstat_arrow.write_dta(shared, table, meta)  # identical lists -> one label set
+
+    shared.seek(0)
+    _, _schema, back = readstat_arrow.read_dta_metadata(shared)
+    q1, q2 = back.value_labels["q1"], back.value_labels["q2"]
+    assert q1 == q2 == codes
+    assert q1 is not q2
+    assert q1[0] is not q2[0]  # the Codes are copies too, not shared dictionaries
+
+
+def test_rename_variable() -> None:
+    _, _schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+
+    renamed = meta.rename_variable("mylabl", "sex")
+
+    assert renamed.value_labels["sex"] == meta.value_labels["mylabl"]
+    assert renamed.variable_labels["sex"] == meta.variable_labels["mylabl"]
+    assert "mylabl" not in renamed.value_labels  # gone from every mapping ...
+    assert "mylabl" not in renamed.formats
+    assert "mylabl" in meta.value_labels  # ... and the original is untouched
+    # The entry keeps its place, so the repr still reads in file order.
+    assert list(renamed.formats) == ["mychar", "mynum", "mydate", "dtime", "sex", "myord", "mytime"]
+
+    with pytest.raises(ValueError, match="'myord' already declares something"):
+        meta.rename_variable("mylabl", "myord")
+
+
+def test_repr_cuts_long_mappings_short() -> None:
+    """A file's worth of variables has to stay readable at a prompt."""
+    meta = Metadata(
+        variable_labels={f"v{i}": f"Variable {i}" for i in range(5)},
+        missing_values={"v0": {"values": [9.0]}},
+        file_label="Big",
+    )
+
+    assert repr(meta) == dedent("""\
+        Metadata(
+            variable_labels={'v0': 'Variable 0', 'v1': 'Variable 1', 'v2': 'Variable 2', ... +2 more},
+            value_labels={},
+            formats={},
+            storage_widths={},
+            display_widths={},
+            measures={},
+            alignments={},
+            missing_values={'v0': {'values': [9.0]}},
+            file_label='Big',
+            notes=[],
+            multiple_response_sets=[]
+        )""")
+
+
+def _rename_all(meta: Metadata, names: list[str], *, suffix: str) -> Metadata:
+    for name in names:
+        meta = meta.rename_variable(name, name + suffix)
+    return meta

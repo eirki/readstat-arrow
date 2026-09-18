@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=77", "cython>=3.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readstat-arrow"
+version = "2026.09.17.0"
+description = "Read and write SPSS (.sav) and Stata (.dta) files as Apache Arrow tables via ReadStat"
+readme = "README.md"
+license = "MIT"
+# The compiled extensions statically link the vendored ReadStat (also MIT) and,
+# on Windows, win_iconv (public domain), so those notices travel with the wheels.
+license-files = [
+  "LICENSE",
+  "vendor/ReadStat/LICENSE",
+  "vendor/win-iconv/readme.txt",
+]
+requires-python = ">=3.11"
+authors = [{ name = "Eirik Stavestrand" }]
+keywords = ["arrow", "pyarrow", "spss", "stata", "readstat", "sav", "dta"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Cython",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["pyarrow>=17"]
+
+[project.urls]
+Homepage = "https://github.com/eirki/readstat-arrow"
+
+[dependency-groups]
+dev = [
+  "cython>=3.1",
+  "setuptools>=77",
+  "pytest>=8",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "coverage>=7.16.1",
+  "bumpver>=2026.1132",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["readstat_arrow", "readstat_arrow._cython"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+readstat_arrow = ["py.typed"]
+"readstat_arrow._cython" = ["*.pxd"]
+
+[tool.uv]
+# uv caches built wheels of the project; rebuild when any of these change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "setup.py" },
+  { file = "src/readstat_arrow/_cython/*.py" },
+  { file = "src/readstat_arrow/_cython/*.pxd" },
+  { file = "vendor/ReadStat/src/**/*.c" },
+  { file = "vendor/ReadStat/src/**/*.h" },
+]
+
+[tool.cibuildwheel]
+# CPython 3.11-3.14 on manylinux/musllinux (x86_64, aarch64), macOS (x86_64,
+# arm64) and win_amd64.  No PyPy (no pyarrow), no free-threaded builds (ditto),
+# no 32-bit.
+build = "cp3{11,12,13,14}-*"
+skip = ["*_i686", "*-win32"]
+
+# manylinux2014 is end-of-life and pyarrow targets manylinux_2_28; match it.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+# Run the real suite against the installed wheel on every target.  This is the
+# only place the vendored win_iconv and musl's iconv get exercised: tests/data
+# includes Hebrew and Telugu .sav files, so a charset conversion that differs
+# from glibc's iconv surfaces here as a red build rather than as user mojibake.
+test-requires = ["pytest"]
+test-sources = ["tests"]
+test-command = "pytest tests"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["src/readstat_arrow"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 100
+exclude_also = ["pragma: no cover", ".*assert_never.*"]
+omit = ["src/readstat_arrow/_cython/*"]
+
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["*.md"] # keep hand-aligned comments in README code blocks
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# _cython/ is Cython pure-Python mode; it legitimately uses patterns ruff dislikes.
+per-file-ignores = { "src/readstat_arrow/_cython/*.py" = [
+  "F401",
+  "F841",
+  "F842",
+  "I001",
+  "SIM109",
+  "RUF012",
+  "UP",
+] }
+# Disable fix for unused imports (`F401`).
+unfixable = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/readstat_arrow", "tests"]
+exclude = ["src/readstat_arrow/_cython/"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Compiled modules: mypy would otherwise read the pure-Python-mode source and
+# misjudge e.g. __cinit__ signatures. Treat them as untyped.
+module = ["readstat_arrow._cython.*"]
+follow_imports = "skip"
+
+[tool.bumpver]
+version_pattern = "YYYY.0M.0D.INC0"
+current_version = "2026.09.17.0"
+
+[tool.bumpver.file_patterns]
+"pyproject.toml" = ['version = "{version}"']

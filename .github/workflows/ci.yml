@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  static:
+    name: lint + types
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # --locked fails rather than silently re-resolving, so a stale uv.lock is
+      # a build error instead of a difference between CI and everyone's machine.
+      - run: uv sync --locked
+
+      - run: uv run ruff check --output-format=github .
+
+      - run: uv run ruff format --check .
+
+      - run: uv run mypy
+
+  tests:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The full supported range.  Only Linux here: wheels.yml already runs
+        # this same suite on macOS and Windows against the built wheels, so
+        # repeating the matrix here would buy nothing but minutes.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked --python ${{ matrix.python }}
+
+      - run: uv run --python ${{ matrix.python }} coverage run -m pytest
+
+      # fail_under = 100 lives in pyproject.toml, so this is the coverage gate.
+      - run: uv run --python ${{ matrix.python }} coverage report

@@ -1,0 +1,131 @@
+name: Wheels
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish-testpypi:
+        description: Also upload the built artifacts to TestPyPI
+        type: boolean
+        default: false
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  # Never cancel a release build half way through.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10
+
+      - run: uv build --sdist --out-dir dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  wheels:
+    name: ${{ matrix.label }}
+    needs: sdist
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64 }
+          # macos-15 is Apple Silicon; the Intel image carries the -intel suffix
+          # since the macos-13 runners were retired.  If Intel runners ever go
+          # away entirely, the fallback is CIBW_ARCHS=x86_64 on an arm64 runner
+          # -- but cross-compiled wheels cannot be tested, so prefer native.
+          - { os: macos-15-intel, label: macos-x86_64 }
+          - { os: macos-15, label: macos-arm64 }
+          - { os: windows-2025, label: windows-amd64 }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-sdist
+          path: sdist
+
+      # Build from the sdist rather than from a checkout, so every wheel proves
+      # the sdist is self-contained.  A MANIFEST.in that forgets a vendored
+      # header then fails here instead of in a user's `pip install`.
+      #
+      # Hand cibuildwheel the tarball itself, not an unpacked directory: given a
+      # tarball it resolves test-sources inside the expanded sdist, whereas in
+      # directory mode those paths are relative to the working directory and
+      # `tests` would not be found.  The action takes no globs, hence the lookup.
+      - name: Locate the sdist
+        id: sdist
+        shell: bash
+        run: echo "path=$(ls sdist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/cibuildwheel@v4.2.1
+        with:
+          package-dir: ${{ steps.sdist.outputs.path }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.label }}
+          path: wheelhouse/*.whl
+
+  # Dry run: exercises the whole OIDC handshake and the upload itself without
+  # burning a version number on real PyPI.  Run it from the Actions tab with the
+  # publish-testpypi box ticked.
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch' && inputs.publish-testpypi
+    needs: [sdist, wheels]
+    runs-on: ubuntu-24.04
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # TestPyPI rejects a version it already holds, and the date-based
+          # version only changes on a bumpver run -- so let repeat dry runs be
+          # no-ops instead of failures.
+          skip-existing: true
+
+  publish:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs: [sdist, wheels]
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      # Trusted Publishing: PyPI mints a short-lived token from this OIDC
+      # identity, so the repository holds no API token at all.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
