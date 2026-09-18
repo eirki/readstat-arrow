@@ -90,7 +90,7 @@ jobs:
   # publish-testpypi box ticked.
   publish-testpypi:
     name: Publish to TestPyPI
-    if: github.event_name == 'workflow_dispatch' && inputs.publish-testpypi
+    if: github.event_name == 'release'
     needs: [sdist, wheels]
     runs-on: ubuntu-24.04
     environment: testpypi
@@ -111,21 +111,21 @@ jobs:
           # no-ops instead of failures.
           skip-existing: true
 
-  publish:
-    name: Publish to PyPI
-    if: github.event_name == 'release'
-    needs: [sdist, wheels]
-    runs-on: ubuntu-24.04
-    environment: pypi
-    permissions:
-      # Trusted Publishing: PyPI mints a short-lived token from this OIDC
-      # identity, so the repository holds no API token at all.
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: dist-*
-          merge-multiple: true
-          path: dist
+  # publish:
+  #   name: Publish to PyPI
+  #   if: github.event_name == 'release'
+  #   needs: [sdist, wheels]
+  #   runs-on: ubuntu-24.04
+  #   environment: pypi
+  #   permissions:
+  #     # Trusted Publishing: PyPI mints a short-lived token from this OIDC
+  #     # identity, so the repository holds no API token at all.
+  #     id-token: write
+  #   steps:
+  #     - uses: actions/download-artifact@v8
+  #       with:
+  #         pattern: dist-*
+  #         merge-multiple: true
+  #         path: dist
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+  #     - uses: pypa/gh-action-pypi-publish@release/v1
