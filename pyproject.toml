@@ -135,6 +135,7 @@ follow_imports = "skip"
 version_pattern = "YYYY.MM.DD.INC0"
 commit = true
 tag = true
+push = true
 current_version = "2026.9.18.1"
 
 [tool.bumpver.file_patterns]
