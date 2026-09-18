@@ -565,7 +565,7 @@ wheels = [
 
 [[package]]
 name = "readstat-arrow"
-version = "2026.9.17.0"
+version = "2026.9.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "pyarrow" },
