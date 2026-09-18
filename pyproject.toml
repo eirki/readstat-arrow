@@ -139,3 +139,4 @@ current_version = "2026.9.18.0"
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['version = "{version}"']
+"uv.lock" = ['version = "{version}"']
