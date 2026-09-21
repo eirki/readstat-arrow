@@ -14,8 +14,9 @@ import pyarrow as pa
 import pytest
 
 import readstat_arrow
-
-DATA_DIR = Path(__file__).parent / "data"
+from conftest import DATA_DIR, METADATA_READER_FUNCS, READER_FUNCS, SAMPLES
+from readstat_arrow import Code
+from readstat_arrow._formats import FileFormat
 
 # The columns every sample.* file holds (see tests/data/sample.csv). Formats differ
 # in how they store the two labelled integer columns, so each test spells out the
@@ -43,23 +44,29 @@ MYTIME = pa.array(
 MYLABL = [1, 2, 1, 2, 1]
 MYORD = [1, 2, 3, 1, 1]
 
-# SPSS stores labelled values as doubles, Stata as integers.
-SAV_MYLABL_LABELS = [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}]
-SAV_MYORD_LABELS = [
-    {"value": 1.0, "label": "low"},
-    {"value": 2.0, "label": "medium"},
-    {"value": 3.0, "label": "high"},
-]
-DTA_MYLABL_LABELS = [{"value": 1, "label": "Male"}, {"value": 2, "label": "Female"}]
-DTA_MYORD_LABELS = [
-    {"value": 1, "label": "low"},
-    {"value": 2, "label": "medium"},
-    {"value": 3, "label": "high"},
-]
+# SPSS stores labelled values as doubles, Stata as integers (int8 for these, a "byte").
+LABELLED_TYPE: dict[FileFormat, pa.DataType] = {"sav": pa.float64(), "dta": pa.int8()}
+MYLABL_LABELS: dict[FileFormat, list[Code]] = {
+    "sav": [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}],
+    "dta": [{"value": 1, "label": "Male"}, {"value": 2, "label": "Female"}],
+}
+MYORD_LABELS: dict[FileFormat, list[Code]] = {
+    "sav": [
+        {"value": 1.0, "label": "low"},
+        {"value": 2.0, "label": "medium"},
+        {"value": 3.0, "label": "high"},
+    ],
+    "dta": [
+        {"value": 1, "label": "low"},
+        {"value": 2, "label": "medium"},
+        {"value": 3, "label": "high"},
+    ],
+}
 
 
-def test_read_sav() -> None:
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
+def test_read_sample(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    table, meta = read(SAMPLES[fmt])
 
     expected = pa.table(
         {
@@ -67,74 +74,50 @@ def test_read_sav() -> None:
             "mynum": MYNUM,
             "mydate": MYDATE,
             "dtime": DTIME,
-            "mylabl": pa.array(MYLABL, pa.float64()),
-            "myord": pa.array(MYORD, pa.float64()),
+            "mylabl": pa.array(MYLABL, LABELLED_TYPE[fmt]),
+            "myord": pa.array(MYORD, LABELLED_TYPE[fmt]),
             "mytime": MYTIME,
         }
     )
     assert table.equals(expected)
     assert table.column_names == expected.column_names
-    assert meta.value_labels["mylabl"] == SAV_MYLABL_LABELS
-    assert meta.value_labels["myord"] == SAV_MYORD_LABELS
+    assert meta.variable_labels["mychar"] == "character"
+    assert meta.value_labels["mylabl"] == MYLABL_LABELS[fmt]
+    assert meta.value_labels["myord"] == MYORD_LABELS[fmt]
     assert "mychar" not in meta.value_labels
 
-
-def test_read_dta() -> None:
-    table, meta = readstat_arrow.read_dta(DATA_DIR / "sample.dta")
-
-    # Stata stores small integers as int8 (byte).
-    expected = pa.table(
-        {
-            "mychar": MYCHAR,
-            "mynum": MYNUM,
-            "mydate": MYDATE,
-            "dtime": DTIME,
-            "mylabl": pa.array(MYLABL, pa.int8()),
-            "myord": pa.array(MYORD, pa.int8()),
-            "mytime": MYTIME,
-        }
-    )
-    assert table.equals(expected)
-    assert meta.formats["mytime"] == "%tcHH:MM:SS"
-    assert meta.missing_values == {}  # an SPSS-only concept
-    assert meta.value_labels["mylabl"] == DTA_MYLABL_LABELS
-    assert meta.value_labels["myord"] == DTA_MYORD_LABELS
+    # What only one of the two files has a way of saying.
+    if fmt == "sav":
+        assert meta.measures["mychar"] == "nominal"
+        assert meta.storage_widths["mychar"] == 1  # A1: the declared width, not SPSS's 8-byte cell
+        assert meta.notes  # sample.sav carries a document record
+        assert meta.missing_values == {}
+    elif fmt == "dta":
+        assert meta.formats["mytime"] == "%tcHH:MM:SS"
+        assert meta.missing_values == {}  # an SPSS-only concept, so empty here whatever the file
+    else:
+        t.assert_never(fmt)
 
 
-def test_variable_metadata() -> None:
-    _, meta = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    assert meta.variable_labels["mychar"] == "character"
-    assert meta.measures["mychar"] == "nominal"
-    assert meta.storage_widths["mychar"] == 1  # A1: the declared width, not SPSS's 8-byte cell
-    assert meta.notes  # sample.sav carries a document record
-
-
-def test_column_selection() -> None:
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "sample.sav", columns=["mynum", "mychar"])
+def test_column_selection(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    table, meta = read(SAMPLES[fmt], columns=["mynum", "mychar"])
     # File order wins over the requested order.
     assert table.equals(pa.table({"mychar": MYCHAR, "mynum": MYNUM}))
     assert table.column_names == ["mychar", "mynum"]  # file order wins in the metadata too
     assert list(meta.formats) == ["mychar", "mynum"]
 
 
-def test_row_limit_and_offset() -> None:
-    table, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav", row_limit=2, row_offset=1)
+def test_row_limit_and_offset(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    table, _ = read(SAMPLES[fmt], row_limit=2, row_offset=1)
     assert table.column("mychar").to_pylist() == ["b", "c"]
     assert table.num_rows == 2
 
 
-def test_preserve_user_missing() -> None:
-    default, meta = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav")
-    kept, _ = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav", preserve_user_missing=True)
-
-    assert meta.missing_values["mynum"] == {"lo": 2000.0, "hi": 3000.0, "value": -1.0}
-    assert meta.missing_values["myord"] == {"values": [-1.0, -2.0, -3.0]}
-    assert "mychar" not in meta.missing_values
-    assert default.column("mynum").null_count > kept.column("mynum").null_count
-
-
-def test_read_metadata_only() -> None:
-    row_count, schema, _meta = readstat_arrow.read_dta_metadata(DATA_DIR / "sample.dta")
+def test_read_metadata_only(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    row_count, schema, _meta = read_metadata(SAMPLES[fmt])
     assert row_count == 5
     assert schema.names == [
         "mychar",
@@ -147,30 +130,195 @@ def test_read_metadata_only() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("name", "read", "read_metadata"),
-    [
-        ("sample.sav", readstat_arrow.read_sav, readstat_arrow.read_sav_metadata),
-        ("sample.dta", readstat_arrow.read_dta, readstat_arrow.read_dta_metadata),
-    ],
-)
-def test_metadata_schema_matches_a_full_read(
-    name: str, read: t.Callable[..., t.Any], read_metadata: t.Callable[..., t.Any]
-) -> None:
-    table, _ = read(DATA_DIR / name)
-    _, schema, _meta = read_metadata(DATA_DIR / name)
+def test_metadata_schema_matches_a_full_read(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    read = READER_FUNCS[fmt]
+    table, _ = read(SAMPLES[fmt])
+    _, schema, _meta = read_metadata(SAMPLES[fmt])
 
     assert schema == table.schema
 
 
-def test_clean_file_emits_no_warnings() -> None:
+def test_clean_file_emits_no_warnings(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
     with warnings.catch_warnings():
         warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-        readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-        readstat_arrow.read_dta(DATA_DIR / "sample.dta")
+        read(SAMPLES[fmt])
 
 
-def test_recoverable_parse_problems_become_warnings() -> None:
+def test_missing_file(fmt: FileFormat, tmp_path: Path) -> None:
+    read = READER_FUNCS[fmt]
+    with pytest.raises(readstat_arrow.ReadstatError):
+        read(tmp_path / f"nope.{fmt}")
+
+
+def test_table_survives_ipc_roundtrip(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    table, _ = read(SAMPLES[fmt])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    back = pa.ipc.open_stream(sink.getvalue()).read_all()
+    assert back.equals(table)
+    assert back.schema.metadata is None
+
+
+def test_read_metadata_carries_the_value_labels(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    row_count, _schema, meta = read_metadata(SAMPLES[fmt])
+    assert row_count == 5
+    assert meta.value_labels["mylabl"] == MYLABL_LABELS[fmt]
+
+
+def test_read_from_file_object(fmt: FileFormat) -> None:
+    """A file object gives exactly what the same file at a path gives."""
+    read = READER_FUNCS[fmt]
+    expected, expected_meta = read(SAMPLES[fmt])
+    with SAMPLES[fmt].open("rb") as file:
+        table, meta = read(file)
+        assert not file.closed  # the caller's file object is left open
+
+    assert table.equals(expected)
+    assert meta == expected_meta
+
+
+def test_read_from_an_os_encoded_path(fmt: FileFormat) -> None:
+    """``os.PathLike`` is not the only path: bytes are handed to ReadStat as they are."""
+    read = READER_FUNCS[fmt]
+    expected, _ = read(SAMPLES[fmt])
+    table, _ = read(os.fsencode(SAMPLES[fmt]))
+    assert table.equals(expected)
+
+
+def test_read_from_bytes_io(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    expected, _ = read(SAMPLES[fmt])
+    table, _ = read(io.BytesIO(SAMPLES[fmt].read_bytes()))
+    assert table.equals(expected)
+
+
+def test_read_metadata_from_file_object(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    expected = read_metadata(SAMPLES[fmt])
+    with SAMPLES[fmt].open("rb") as file:
+        assert read_metadata(file) == expected
+
+
+def test_read_from_file_object_honours_options(fmt: FileFormat) -> None:
+    """The options are the parser's, not the path's: a file object gets all of them."""
+    read = READER_FUNCS[fmt]
+    table, _ = read(
+        io.BytesIO(SAMPLES[fmt].read_bytes()),
+        columns=["mynum", "mydate"],
+        row_limit=2,
+        row_offset=1,
+    )
+    assert table.column_names == ["mynum", "mydate"]
+    assert table.column("mynum").to_pylist() == [1.2, -1000.3]
+
+
+def test_read_from_unbuffered_file_object(fmt: FileFormat) -> None:
+    """A raw file can return a short read; the io handler asks again rather than stopping."""
+    read = READER_FUNCS[fmt]
+    expected, _ = read(SAMPLES[fmt])
+    with SAMPLES[fmt].open("rb", buffering=0) as file:
+        table, _ = read(file)
+    assert table.equals(expected)
+
+
+def test_read_from_file_object_starts_where_it_is(fmt: FileFormat) -> None:
+    """Reading begins at the file object's position, so a file embedded in a stream works."""
+    read = READER_FUNCS[fmt]
+    expected, _ = read(SAMPLES[fmt])
+    stream = io.BytesIO(b"PREFIX!!" + SAMPLES[fmt].read_bytes())
+    stream.seek(8)
+
+    table, _ = read(stream)
+    assert table.equals(expected)
+
+
+def test_read_rejects_unseekable_file_object(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+
+    class Unseekable(io.RawIOBase):
+        def readable(self) -> bool:
+            return True
+
+        def seekable(self) -> bool:
+            return False
+
+    with pytest.raises(ValueError, match="not seekable"):
+        unseekable: t.Any = Unseekable()
+        read(unseekable)
+
+
+def test_read_reports_a_failure_of_the_file_object(fmt: FileFormat) -> None:
+    """An exception from the file object reaches the caller, not ReadStat's account of it."""
+    read = READER_FUNCS[fmt]
+
+    class Failing(io.BytesIO):
+        def readinto(self, buffer: object) -> int:
+            raise OSError("no disk today")
+
+    with pytest.raises(OSError, match="no disk today"):
+        read(Failing(SAMPLES[fmt].read_bytes()))
+
+
+def test_read_truncated_file_object(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    truncated = io.BytesIO(SAMPLES[fmt].read_bytes()[:120])
+    with pytest.raises(readstat_arrow.ReadstatError):
+        read(truncated)
+
+
+def test_read_from_a_minimal_file_object(fmt: FileFormat) -> None:
+    """Only read/seek/tell are required - no readinto, and no seekable to ask."""
+    read = READER_FUNCS[fmt]
+
+    class Minimal:
+        def __init__(self, data: bytes) -> None:
+            self._buffer = io.BytesIO(data)
+
+        def read(self, size: int = -1) -> bytes:
+            return self._buffer.read(size)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return self._buffer.seek(offset, whence)
+
+        def tell(self) -> int:
+            return self._buffer.tell()
+
+    expected, _ = read(SAMPLES[fmt])
+    minimal: t.Any = Minimal(SAMPLES[fmt].read_bytes())
+    table, _ = read(minimal)
+    assert table.equals(expected)
+
+
+def test_read_from_zip_member(fmt: FileFormat, tmp_path: Path) -> None:
+    """A file inside an archive, never extracted to disk."""
+    read = READER_FUNCS[fmt]
+    archive_path = tmp_path / "survey.zip"
+    member_name = f"survey.{fmt}"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.write(SAMPLES[fmt], member_name)
+
+    expected, _ = read(SAMPLES[fmt])
+    with zipfile.ZipFile(archive_path) as archive, archive.open(member_name) as member:
+        table, _ = read(member)
+    assert table.equals(expected)
+
+
+def test_sav_preserve_user_missing() -> None:
+    default, meta = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav")
+    kept, _ = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav", preserve_user_missing=True)
+
+    assert meta.missing_values["mynum"] == {"lo": 2000.0, "hi": 3000.0, "value": -1.0}
+    assert meta.missing_values["myord"] == {"values": [-1.0, -2.0, -3.0]}
+    assert "mychar" not in meta.missing_values
+    assert default.column("mynum").null_count > kept.column("mynum").null_count
+
+
+def test_sav_recoverable_parse_problems_become_warnings() -> None:
     """ReadStat reports some problems and carries on reading; those become ReadstatWarnings.
 
     None of the sample files is broken in that way, so the file is built here: a
@@ -190,7 +338,7 @@ def test_recoverable_parse_problems_become_warnings() -> None:
     assert table.column_names == ["AVERYLON"]  # the long name was lost with the record
 
 
-def test_variable_without_a_display_format() -> None:
+def test_sav_variable_without_a_display_format() -> None:
     """A .sav can leave a variable's format unset; then nothing is a date and widths stand as read.
 
     ReadStat's own writer always emits a format, so the file is made by blanking
@@ -213,39 +361,18 @@ def test_variable_without_a_display_format() -> None:
     assert (row_count, schema, metadata_only) == (2, table.schema, meta)
 
 
-def test_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(readstat_arrow.ReadstatError):
-        readstat_arrow.read_sav(tmp_path / "nope.sav")
-
-
-def test_table_survives_ipc_roundtrip() -> None:
-    table, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
-    back = pa.ipc.open_stream(sink.getvalue()).read_all()
-    assert back.equals(table)
-    assert back.schema.metadata is None
-
-
-def test_read_sav_metadata() -> None:
-    row_count, _schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-    assert row_count == 5
-    assert meta.value_labels["mylabl"] == SAV_MYLABL_LABELS
-
-
-def test_utf8_string_values() -> None:
+def test_sav_utf8_string_values() -> None:
     table, _ = readstat_arrow.read_sav(DATA_DIR / "tegulu.sav")
     assert table.column("Q16br9oe_Q24br9oe").to_pylist() == ["నేను గతంలో వాడిన బ"]
 
 
-def test_non_ascii_variable_name() -> None:
+def test_sav_non_ascii_variable_name() -> None:
     table, meta = readstat_arrow.read_sav(DATA_DIR / "hebrews.sav")
     assert table.column_names == ["ותק_ב"]
     assert meta.formats["ותק_ב"] == "F8.0"
 
 
-def test_very_long_strings() -> None:
+def test_sav_very_long_strings() -> None:
     """SPSS stores strings over 255 bytes in 252-byte segments; ReadStat reassembles them."""
     table, meta = readstat_arrow.read_sav(DATA_DIR / "test_width.sav")
 
@@ -258,7 +385,7 @@ def test_very_long_strings() -> None:
     assert meta.formats["Duration__in_seconds_"] == "F40.2"
 
 
-def test_string_user_missing_values() -> None:
+def test_sav_string_user_missing_values() -> None:
     """`MISSING VALUES mychar ('Z')`: a string value declared missing."""
     table, meta = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav")
     preserved, _ = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav", preserve_user_missing=True)
@@ -269,7 +396,7 @@ def test_string_user_missing_values() -> None:
     assert meta.value_labels["mychar"] == [{"value": "a", "label": "labeled"}]
 
 
-def test_missing_ranges_and_labelled_missing_values() -> None:
+def test_sav_missing_ranges_and_labelled_missing_values() -> None:
     table, meta = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav")
     preserved, _ = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav", preserve_user_missing=True)
 
@@ -286,7 +413,7 @@ def test_missing_ranges_and_labelled_missing_values() -> None:
     assert meta.value_labels["z"] == [{"value": 999.0, "label": "skipped"}]
 
 
-def test_multiple_response_sets() -> None:
+def test_sav_multiple_response_sets() -> None:
     _, _schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
     assert meta.multiple_response_sets == [
         {
@@ -310,7 +437,7 @@ def test_multiple_response_sets() -> None:
     assert without.multiple_response_sets == []
 
 
-def test_stata_tagged_missing_values_are_null_by_default() -> None:
+def test_dta_tagged_missing_values_are_null_by_default() -> None:
     """Stata's .a-.z are nulls in the table, indistinguishable from '.', unless asked for."""
     table, meta = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta")
 
@@ -320,7 +447,7 @@ def test_stata_tagged_missing_values_are_null_by_default() -> None:
     assert meta.value_labels["var1"] == [{"value": "a", "label": "missing"}]
 
 
-def test_stata_tagged_missing_values_as_structs() -> None:
+def test_dta_tagged_missing_values_as_structs() -> None:
     """With preserve_user_missing=True every numeric column is struct<value, tag>."""
     table, _ = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta", preserve_user_missing=True)
 
@@ -335,7 +462,7 @@ def test_stata_tagged_missing_values_as_structs() -> None:
     assert table.column("var1").null_count == 0
 
 
-def test_tag_structs_wrap_every_numeric_column() -> None:
+def test_dta_tag_structs_wrap_every_numeric_column() -> None:
     """The schema depends on the file's dictionary, not on which cells happen to be tagged."""
     table, _ = readstat_arrow.read_dta(DATA_DIR / "sample.dta", preserve_user_missing=True)
     for name in ("mynum", "mylabl", "mydate", "dtime", "mytime"):
@@ -344,131 +471,3 @@ def test_tag_structs_wrap_every_numeric_column() -> None:
     assert table.schema.field("mychar").type == pa.large_string()  # strings cannot be missing in Stata
     assert table.schema.field("mydate").type.field("value").type == pa.date32()  # dates are still converted
     assert table.column("mynum").to_pylist()[0] == {"value": 1.1, "tag": None}
-
-
-@pytest.mark.parametrize("name", ["sample.sav", "sample.dta"])
-def test_read_from_file_object(name: str) -> None:
-    """A file object gives exactly what the same file at a path gives."""
-    path = DATA_DIR / name
-    read = readstat_arrow.read_sav if name.endswith(".sav") else readstat_arrow.read_dta
-
-    expected, expected_meta = read(path)
-    with path.open("rb") as file:
-        table, meta = read(file)
-        assert not file.closed  # the caller's file object is left open
-
-    assert table.equals(expected)
-    assert meta == expected_meta
-
-
-def test_read_from_an_os_encoded_path() -> None:
-    """``os.PathLike`` is not the only path: bytes are handed to ReadStat as they are."""
-    expected, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    table, _ = readstat_arrow.read_sav(os.fsencode(DATA_DIR / "sample.sav"))
-    assert table.equals(expected)
-
-
-def test_read_from_bytes_io() -> None:
-    expected, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    table, _ = readstat_arrow.read_sav(io.BytesIO((DATA_DIR / "sample.sav").read_bytes()))
-    assert table.equals(expected)
-
-
-def test_read_metadata_from_file_object() -> None:
-    expected = readstat_arrow.read_dta_metadata(DATA_DIR / "sample.dta")
-    with (DATA_DIR / "sample.dta").open("rb") as file:
-        assert readstat_arrow.read_dta_metadata(file) == expected
-
-
-def test_read_from_file_object_honours_options() -> None:
-    """The options are the parser's, not the path's: a file object gets all of them."""
-    table, _ = readstat_arrow.read_sav(
-        io.BytesIO((DATA_DIR / "sample.sav").read_bytes()),
-        columns=["mynum", "mydate"],
-        row_limit=2,
-        row_offset=1,
-    )
-    assert table.column_names == ["mynum", "mydate"]
-    assert table.column("mynum").to_pylist() == [1.2, -1000.3]
-
-
-def test_read_from_unbuffered_file_object() -> None:
-    """A raw file can return a short read; the io handler asks again rather than stopping."""
-    expected, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    with (DATA_DIR / "sample.sav").open("rb", buffering=0) as file:
-        table, _ = readstat_arrow.read_sav(file)
-    assert table.equals(expected)
-
-
-def test_read_from_file_object_starts_where_it_is() -> None:
-    """Reading begins at the file object's position, so a file embedded in a stream works."""
-    expected, _ = readstat_arrow.read_dta(DATA_DIR / "sample.dta")
-    stream = io.BytesIO(b"PREFIX!!" + (DATA_DIR / "sample.dta").read_bytes())
-    stream.seek(8)
-
-    table, _ = readstat_arrow.read_dta(stream)
-    assert table.equals(expected)
-
-
-def test_read_rejects_unseekable_file_object() -> None:
-    class Unseekable(io.RawIOBase):
-        def readable(self) -> bool:
-            return True
-
-        def seekable(self) -> bool:
-            return False
-
-    with pytest.raises(ValueError, match="not seekable"):
-        unseekable: t.Any = Unseekable()
-        readstat_arrow.read_sav(unseekable)
-
-
-def test_read_reports_a_failure_of_the_file_object() -> None:
-    """An exception from the file object reaches the caller, not ReadStat's account of it."""
-
-    class Failing(io.BytesIO):
-        def readinto(self, buffer: object) -> int:
-            raise OSError("no disk today")
-
-    with pytest.raises(OSError, match="no disk today"):
-        readstat_arrow.read_sav(Failing((DATA_DIR / "sample.sav").read_bytes()))
-
-
-def test_read_truncated_file_object() -> None:
-    truncated = io.BytesIO((DATA_DIR / "sample.sav").read_bytes()[:120])
-    with pytest.raises(readstat_arrow.ReadstatError):
-        readstat_arrow.read_sav(truncated)
-
-
-def test_read_from_a_minimal_file_object() -> None:
-    """Only read/seek/tell are required - no readinto, and no seekable to ask."""
-
-    class Minimal:
-        def __init__(self, data: bytes) -> None:
-            self._buffer = io.BytesIO(data)
-
-        def read(self, size: int = -1) -> bytes:
-            return self._buffer.read(size)
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            return self._buffer.seek(offset, whence)
-
-        def tell(self) -> int:
-            return self._buffer.tell()
-
-    expected, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    minimal: t.Any = Minimal((DATA_DIR / "sample.sav").read_bytes())
-    table, _ = readstat_arrow.read_sav(minimal)
-    assert table.equals(expected)
-
-
-def test_read_from_zip_member(tmp_path: Path) -> None:
-    """A file inside an archive, never extracted to disk."""
-    archive_path = tmp_path / "survey.zip"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(DATA_DIR / "sample.sav", "survey.sav")
-
-    expected, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
-    with zipfile.ZipFile(archive_path) as archive, archive.open("survey.sav") as member:
-        table, _ = readstat_arrow.read_sav(member)
-    assert table.equals(expected)

@@ -4,31 +4,48 @@ from __future__ import annotations
 
 import io
 from dataclasses import replace
-from pathlib import Path
 from textwrap import dedent
 
 import pyarrow as pa
 import pytest
 
 import readstat_arrow
+from conftest import DATA_DIR, METADATA_READER_FUNCS, SAMPLES, WRITER_FUNCS
 from readstat_arrow import Code, Metadata
+from readstat_arrow._formats import FileFormat
 
-DATA_DIR = Path(__file__).parent / "data"
-
-
-def test_mappings_hold_only_what_the_file_declares() -> None:
-    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-
-    assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
-    assert meta.variable_labels["mychar"] == "character"
-    assert meta.value_labels == {
+# SPSS stores labelled values as doubles, Stata as integers.
+SAMPLE_VALUE_LABELS: dict[FileFormat, dict[str, list[Code]]] = {
+    "sav": {
         "mylabl": [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}],
         "myord": [
             {"value": 1.0, "label": "low"},
             {"value": 2.0, "label": "medium"},
             {"value": 3.0, "label": "high"},
         ],
-    }
+    },
+    "dta": {
+        "mylabl": [{"value": 1, "label": "Male"}, {"value": 2, "label": "Female"}],
+        "myord": [
+            {"value": 1, "label": "low"},
+            {"value": 2, "label": "medium"},
+            {"value": 3, "label": "high"},
+        ],
+    },
+}
+YES_NO: dict[FileFormat, list[Code]] = {
+    "sav": [{"value": 1.0, "label": "Yes"}, {"value": 2.0, "label": "No"}],
+    "dta": [{"value": 1, "label": "Yes"}, {"value": 2, "label": "No"}],
+}
+
+
+def test_mappings_hold_only_what_the_file_declares(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    _, schema, meta = read_metadata(SAMPLES[fmt])
+
+    assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
+    assert meta.variable_labels["mychar"] == "character"
+    assert meta.value_labels == SAMPLE_VALUE_LABELS[fmt]
     assert "mychar" not in meta.value_labels  # ... and an undeclared name is simply absent
 
 
@@ -41,53 +58,27 @@ def test_describing_a_variable_is_ordinary_dictionary_work() -> None:
     assert meta.value_labels == {"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]}
 
 
-def test_merge() -> None:
-    _, _sav_schema, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-    _, other_schema, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
-    # Give the second file distinct variable names, as if it were another block of columns.
-    other = _rename_all(other, other_schema.names, suffix="_b")
-
-    merged = sav.merge(other)
-
-    assert merged.notes == [*sav.notes, *other.notes]
-    assert merged.file_label == sav.file_label
-    # Every variable keeps its own labels; nothing to reconcile between the files.
-    assert merged.value_labels["mylabl"] == sav.value_labels["mylabl"]
-    assert merged.value_labels["mylabl_b"] == other.value_labels["mylabl_b"]
-    assert merged.missing_values["myord_b"] == {"values": [-1.0, -2.0, -3.0]}
-
-
-def test_merge_prefers_self_on_overlap() -> None:
-    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-    labels: dict[str, str | None] = {name: "other" for name in schema.names}
-    labels["extra"] = "Extra"
-    other = replace(meta, variable_labels=labels)
-
-    merged = meta.merge(other)
-
-    assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
-    assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
-    assert meta.merge(meta) == replace(meta, notes=[*meta.notes, *meta.notes])
-
-
-def test_variables_do_not_share_label_lists() -> None:
+def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
     """Variables that share one label set in the file come back with independent lists."""
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
     codes: list[Code] = [{"value": 1, "label": "Yes"}, {"value": 2, "label": "No"}]
     meta = Metadata(value_labels={"q1": codes, "q2": codes})
     table = pa.table({"q1": pa.array([1], pa.int8()), "q2": pa.array([2], pa.int8())})
     shared = io.BytesIO()
-    readstat_arrow.write_dta(shared, table, meta)  # identical lists -> one label set
+    write(shared, table, meta)  # identical lists -> one label set
 
     shared.seek(0)
-    _, _schema, back = readstat_arrow.read_dta_metadata(shared)
+    _, _schema, back = read_metadata(shared)
     q1, q2 = back.value_labels["q1"], back.value_labels["q2"]
-    assert q1 == q2 == codes
+    assert q1 == q2 == YES_NO[fmt]
     assert q1 is not q2
     assert q1[0] is not q2[0]  # the Codes are copies too, not shared dictionaries
 
 
-def test_rename_variable() -> None:
-    _, _schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+def test_rename_variable(fmt: FileFormat) -> None:
+    read_metadata = METADATA_READER_FUNCS[fmt]
+    _, _schema, meta = read_metadata(SAMPLES[fmt])
 
     renamed = meta.rename_variable("mylabl", "sex")
 
@@ -131,3 +122,36 @@ def _rename_all(meta: Metadata, names: list[str], *, suffix: str) -> Metadata:
     for name in names:
         meta = meta.rename_variable(name, name + suffix)
     return meta
+
+
+# Tests of one format alone: a file, a record or a rule the other format has no equivalent of.
+# Nothing below takes ``fmt``; each says in its name which format it is about.
+
+
+def test_sav_merge() -> None:
+    _, _sav_schema, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    _, other_schema, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
+    # Give the second file distinct variable names, as if it were another block of columns.
+    other = _rename_all(other, other_schema.names, suffix="_b")
+
+    merged = sav.merge(other)
+
+    assert merged.notes == [*sav.notes, *other.notes]
+    assert merged.file_label == sav.file_label
+    # Every variable keeps its own labels; nothing to reconcile between the files.
+    assert merged.value_labels["mylabl"] == sav.value_labels["mylabl"]
+    assert merged.value_labels["mylabl_b"] == other.value_labels["mylabl_b"]
+    assert merged.missing_values["myord_b"] == {"values": [-1.0, -2.0, -3.0]}
+
+
+def test_sav_merge_prefers_self_on_overlap() -> None:
+    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    labels: dict[str, str | None] = {name: "other" for name in schema.names}
+    labels["extra"] = "Extra"
+    other = replace(meta, variable_labels=labels)
+
+    merged = meta.merge(other)
+
+    assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
+    assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
+    assert meta.merge(meta) == replace(meta, notes=[*meta.notes, *meta.notes])

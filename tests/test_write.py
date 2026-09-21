@@ -18,10 +18,15 @@ import pyarrow.compute as pc
 import pytest
 
 import readstat_arrow
+from conftest import READER_FUNCS, WRITER_CLASSES, WRITER_FUNCS
 from readstat_arrow import Code, Metadata, Missingness
 from readstat_arrow._formats import FileFormat
 
 SEX_LABELS: list[Code] = [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}]
+
+MAGIC: dict[FileFormat, bytes] = {"sav": b"$FL2", "dta": b"<sta"}  # the first bytes of a finished file
+# Variable, value and file label limits, in UTF-8 bytes.
+LABEL_LIMITS: dict[FileFormat, tuple[int, int, int]] = {"sav": (256, 120, 64), "dta": (320, 32_000, 256)}
 
 
 def _survey() -> tuple[pa.Table, Metadata]:
@@ -110,6 +115,459 @@ def _panel() -> tuple[pa.Table, Metadata]:
     return table, meta
 
 
+def test_write_and_read_a_path(fmt: FileFormat, tmp_path: Path) -> None:
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table, meta = _survey()
+    out = tmp_path / f"out.{fmt}"
+
+    write(out, table, meta)
+    back, back_meta = read(out)
+
+    assert out.exists()
+    assert back.equals(table)
+    assert back_meta.file_label == "Tiny survey"
+
+
+def test_writer_in_batches(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _survey()
+    out = io.BytesIO()
+
+    with Writer(out, table.schema, table.num_rows, meta) as writer:
+        writer.write_table(table.slice(0, 2))
+        writer.write_batch(table.slice(2).to_batches()[0])
+        assert writer.rows_written == 5
+
+    out.seek(0)
+    back, _ = read(out)
+    assert back.equals(table)
+
+
+def test_writer_leaves_the_callers_file_object_open(fmt: FileFormat) -> None:
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _panel()
+    out = io.BytesIO()
+
+    with Writer(out, table.schema, table.num_rows, meta) as writer:
+        writer.write_table(table)
+
+    assert not out.closed  # caller's file object is left open
+    out.seek(0)
+    assert out.read(4) == MAGIC[fmt]
+
+
+def test_writer_rejects_wrong_schema(fmt: FileFormat) -> None:
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _survey()
+
+    with Writer(io.BytesIO(), table.schema, table.num_rows, meta) as writer:
+        with pytest.raises(ValueError, match="schema"):
+            writer.write_table(table.select(["mychar"]))
+        writer.write_table(table)
+
+
+def test_writer_enforces_row_count(fmt: FileFormat) -> None:
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _survey()
+
+    writer = Writer(io.BytesIO(), table.schema, 3, meta)
+    with pytest.raises(readstat_arrow.ReadstatError, match="3 rows"):
+        writer.write_table(table)
+
+    writer = Writer(io.BytesIO(), table.schema, 10, meta)
+    writer.write_table(table)
+    with pytest.raises(readstat_arrow.ReadstatError):
+        writer.close()
+
+
+def test_writer_rejects_a_negative_row_count(fmt: FileFormat) -> None:
+    Writer = WRITER_CLASSES[fmt]
+    table, _meta = _survey()
+    with pytest.raises(ValueError, match="row_count must be non-negative"):
+        Writer(io.BytesIO(), table.schema, -1)
+
+
+def test_close_is_idempotent(fmt: FileFormat) -> None:
+    """Closing twice is not an error; the second call has nothing left to finish."""
+    read = READER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _survey()
+    out = io.BytesIO()
+
+    writer = Writer(out, table.schema, table.num_rows, meta)
+    writer.write_table(table)
+    writer.close()
+    writer.close()
+
+    out.seek(0)
+    back, _back_meta = read(out)
+    assert back.equals(table)
+
+
+def test_a_failed_write_leaves_no_finished_file(fmt: FileFormat, tmp_path: Path) -> None:
+    """Leaving the block with an exception closes the file without ending the format properly."""
+    read = READER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table, meta = _survey()
+    out = tmp_path / f"partial.{fmt}"
+
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        Writer(out, table.schema, table.num_rows, meta) as writer,
+    ):
+        writer.write_table(table.slice(0, 2))
+        raise RuntimeError("boom")
+
+    assert out.exists()  # what was written stays on disk ...
+    with pytest.raises(readstat_arrow.ReadstatError):  # ... but it does not read as a whole file
+        read(out)
+
+
+def test_columns_without_metadata_are_written_undeclared(fmt: FileFormat) -> None:
+    """A column with no metadata is written anyway; metadata for absent columns is ignored."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"num": pa.array([1.0, 2.0]), "text": pa.array(["x", "yy"])})
+    meta = Metadata(
+        variable_labels={"num": "Numbers", "gone": "Not here"},
+        file_label="Partly described",
+    )
+    out = io.BytesIO()
+
+    write(out, table, meta)
+    out.seek(0)
+    back, back_meta = read(out)
+
+    assert back.to_pydict() == {"num": [1.0, 2.0], "text": ["x", "yy"]}
+    assert back.column_names == ["num", "text"]
+    assert back_meta.variable_labels == {"num": "Numbers"}  # "gone" ignored, "text" declared nothing
+    assert back_meta.value_labels == {}
+    assert back_meta.file_label == "Partly described"
+
+
+def test_none_declares_nothing(fmt: FileFormat) -> None:
+    """A name mapped to None is exactly as undeclared as a name that is absent."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"n": pa.array([1.0]), "s": pa.array(["ab"], pa.large_string())})
+    meta = Metadata(
+        variable_labels={"n": None, "s": "Text"},
+        value_labels={"n": None},
+        formats={"n": None},
+        storage_widths={"s": None},
+        measures={"n": None},
+        display_widths={"n": None},
+        missing_values={"n": None},
+    )
+    nones = io.BytesIO()
+    write(nones, table, meta)
+    nones.seek(0)
+    bare, bare_meta = read(nones)
+
+    empty = io.BytesIO()
+    write(empty, table, Metadata(variable_labels={"s": "Text"}))
+    empty.seek(0)
+    same, same_meta = read(empty)
+
+    assert bare.equals(same)
+    assert bare_meta == same_meta
+    assert bare_meta.variable_labels == {"s": "Text"}
+    assert bare_meta.value_labels == {}
+    assert bare_meta.storage_widths["s"] == 2  # sized from the data, as with no entry at all
+
+
+UNDECLARED: dict[FileFormat, dict[str, list[t.Any]]] = {
+    "sav": {"n": [1.0, 2.0], "s": ["a", "b"]},  # SPSS stores every number as a double
+    "dta": {"n": [1, 2], "s": ["a", "b"]},  # Stata keeps the int8 it was handed
+}
+
+
+def test_write_without_metadata(fmt: FileFormat) -> None:
+    """No metadata at all: the columns keep their Arrow names and nothing else is declared."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"n": pa.array([1, 2], pa.int8()), "s": pa.array(["a", "b"])})
+    omitted, spelled_out = io.BytesIO(), io.BytesIO()
+
+    write(omitted, table)
+    write(spelled_out, table, Metadata())  # the same thing, spelled out
+    assert omitted.getvalue() == spelled_out.getvalue()
+
+    omitted.seek(0)
+    back, back_meta = read(omitted)
+    assert back.to_pydict() == UNDECLARED[fmt]
+    assert back.column_names == ["n", "s"]
+    assert back_meta.variable_labels == {}
+    assert back_meta.file_label is None
+
+
+def test_string_widths_survive_repeated_round_trips(fmt: FileFormat) -> None:
+    """Metadata from a file must write the same widths back, or they creep up every cycle.
+
+    ReadStat reports a string's storage as the format lays it out - SPSS in whole
+    8-byte cells, Stata with a byte for a possible NUL - so the reader normalises
+    it back to the declared width before it can be fed to a writer again.
+    """
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table = pa.table({"s3": pa.array(["abc"]), "s20": pa.array(["x" * 20])})  # "long" is Stata-reserved
+    out = io.BytesIO()
+    write(out, table)  # sizes the columns from the data
+    widths = []
+    for _ in range(3):  # then keep rewriting with nothing but what was read back
+        out.seek(0)
+        data, meta = read(out)
+        widths.append([meta.storage_widths[n] for n in data.column_names])
+        out = io.BytesIO()
+        with Writer(out, data.schema, data.num_rows, meta) as writer:
+            writer.write_table(data)
+
+    assert widths == [[3, 20]] * 3, f"widths drifted: {widths}"
+
+
+def test_incremental_writer_without_metadata(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table = pa.table({"n": pa.array([1.0, 2.0])})
+    out = io.BytesIO()
+
+    with Writer(out, table.schema, table.num_rows) as writer:
+        writer.write_table(table)
+
+    out.seek(0)
+    back, _meta = read(out)
+    assert back.to_pydict() == {"n": [1.0, 2.0]}
+    assert back.column_names == ["n"]
+
+
+def test_unsupported_arrow_type(fmt: FileFormat) -> None:
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"nested": pa.array([[1, 2], [3]])})
+    with pytest.raises(TypeError, match="nested"):
+        write(io.BytesIO(), table)
+
+
+def test_all_null_columns(fmt: FileFormat) -> None:
+    """Entirely empty columns (common in survey data) take a fast path in the writer."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table(
+        {
+            "num": pa.array([None, None, None], pa.float64()),
+            "typed_null": pa.array([None, None, None], pa.null()),
+            "filled": pa.array([1.0, 2.0, 3.0]),
+        }
+    )
+    out = io.BytesIO()
+
+    write(out, table)
+    out.seek(0)
+    back, _ = read(out)
+
+    assert back.column("num").null_count == 3
+    assert back.column("typed_null").null_count == 3
+    assert back.column("filled").to_pylist() == [1.0, 2.0, 3.0]
+
+
+def test_an_all_null_string_column(fmt: FileFormat) -> None:
+    """Neither format has a null string of its own."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"txt": pa.array([None, None, None], pa.large_string())})
+    out = io.BytesIO()
+
+    write(out, table)
+    out.seek(0)
+    back, _ = read(out)
+
+    assert back.column("txt").to_pylist() == ["", "", ""]
+
+
+TAG_TYPE = pa.dictionary(pa.int8(), pa.string())
+TAG_LETTERS = pa.array([chr(c) for c in range(ord("a"), ord("z") + 1)])
+
+
+def _tagged(values: list[int | None], tags: list[str | None]) -> pa.StructArray:
+    """struct<value: int8, tag> exactly as read_dta(preserve_user_missing=True) builds it.
+
+    The tag dictionary is always the full a-z alphabet (Array.equals compares
+    dictionaries, not just decoded values); a null struct where both are None.
+    """
+    value_array = pa.array(values, pa.int8())
+    indices = pa.array([None if t is None else ord(t) - ord("a") for t in tags], pa.int8())
+    tag_array = pa.DictionaryArray.from_arrays(indices, TAG_LETTERS)
+    return pa.StructArray.from_arrays(
+        [value_array, tag_array],
+        names=["value", "tag"],
+        mask=pc.and_(value_array.is_null(), tag_array.is_null()),
+    )
+
+
+def test_an_empty_code_list_writes_no_label_set(fmt: FileFormat) -> None:
+    """A label set with no codes in it corrupts a .sav, so an empty list must write nothing."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"q": pa.array([1, 2], pa.int32())})
+    empty, nothing = io.BytesIO(), io.BytesIO()
+
+    write(empty, table, Metadata(value_labels={"q": []}))
+    write(nothing, table, Metadata())  # no entry for "q" at all
+
+    # Byte for byte the same file: no set was created, and none was referenced.
+    assert empty.getvalue() == nothing.getvalue()
+    empty.seek(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
+        _back, back_meta = read(empty)
+    assert back_meta.value_labels == {}
+
+
+def test_rename_invalid_names_says_nothing_when_nothing_is_renamed(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    Writer = WRITER_CLASSES[fmt]
+    table = pa.table({"ok": pa.array([1.0]), "also_ok": pa.array([2.0])})
+    out = io.BytesIO()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
+        writer = Writer(out, table.schema, 1, rename_invalid_names=True)
+        writer.write_table(table)
+        writer.close()
+
+    assert writer.renamed_variables == {}
+    out.seek(0)
+    back, _meta = read(out)
+    assert back.column_names == ["ok", "also_ok"]
+
+
+@pytest.mark.parametrize(
+    ("name", "bad_name"),
+    [("sav", "with space"), ("dta", "1leading_digit"), ("sav", "x" * 70)],
+)
+def test_invalid_variable_names_are_reported_as_header_errors(name: FileFormat, bad_name: str) -> None:
+    """ReadStat validates names when it emits the header, which happens at the first row."""
+    table = pa.table({bad_name: [1.0]})
+    write = readstat_arrow.write_sav if name == "sav" else readstat_arrow.write_dta
+
+    with pytest.raises(readstat_arrow.ReadstatError, match="writing header") as info:
+        write(io.BytesIO(), table)
+    assert "row 0" not in str(info.value)
+
+
+def test_temporal_type_variants(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table(
+        {
+            "ts_tz": pa.array([1_600_000_000_000_000_000, None], pa.timestamp("ns", tz="Europe/Oslo")),
+            "d64": pa.array([0, 86_400_000], pa.date64()),
+            "dur": pa.array([90_000_000_000, None], pa.duration("us")),  # 25 hours: beyond time64's day
+        }
+    )
+    out = io.BytesIO()
+
+    write(out, table)
+    out.seek(0)
+    back, _ = read(out)
+
+    assert back.schema.types == [pa.timestamp("us"), pa.date32(), pa.duration("us")]
+    assert back.to_pydict() == {
+        "ts_tz": [datetime(2020, 9, 13, 12, 26, 40), None],  # the UTC instant; neither has a timezone
+        "d64": [date(1970, 1, 1), date(1970, 1, 2)],
+        "dur": [timedelta(days=1, hours=1), None],
+    }
+
+
+def test_zero_rows(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"a": pa.array([], pa.float64()), "s": pa.array([], pa.large_string())})
+    out = io.BytesIO()
+
+    write(out, table)
+    out.seek(0)
+    back, _ = read(out)
+
+    assert back.num_rows == 0
+    assert back.column_names == ["a", "s"]
+
+
+def test_long_labels_are_truncated_on_character_boundaries(fmt: FileFormat) -> None:
+    """Limits are in UTF-8 bytes; the cut must never leave half a multibyte character."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    long_variable_label = "ø" * 300  # 600 bytes
+    long_value_label = "€" * 100  # 300 bytes
+    long_file_label = "日本語" * 40  # 360 bytes
+    codes: list[Code] = [{"value": 1, "label": long_value_label}]
+    table = pa.table({"v": pa.array([1], pa.int8())})
+    meta = Metadata(
+        variable_labels={"v": long_variable_label},
+        value_labels={"v": codes},
+        file_label=long_file_label,
+    )
+    out = io.BytesIO()
+
+    with pytest.warns(readstat_arrow.ReadstatWarning, match="truncated"):
+        write(out, table, meta)
+    out.seek(0)
+    _, back = read(out)
+
+    var_limit, value_limit, file_limit = LABEL_LIMITS[fmt]
+    _assert_fitted(back.variable_labels["v"], long_variable_label, var_limit)
+    back_codes = back.value_labels.get("v")
+    assert back_codes is not None  # the label survived, however much of it fitted
+    _assert_fitted(back_codes[0]["label"], long_value_label, value_limit)
+    _assert_fitted(back.file_label, long_file_label, file_limit)
+
+
+def _assert_fitted(actual: str | None, original: str, limit: int) -> None:
+    """``actual`` is the longest whole-character prefix of ``original`` within ``limit`` bytes."""
+    assert actual is not None
+    assert original.startswith(actual)
+    assert len(actual.encode()) <= limit
+    if actual != original:
+        next_char = original[len(actual)]
+        assert len(actual.encode()) + len(next_char.encode()) > limit  # nothing more would have fit
+
+
+UNTOUCHED_CODES: dict[FileFormat, list[Code]] = {
+    "sav": [{"value": 1.0, "label": "€" * 40}],
+    "dta": [{"value": 1, "label": "€" * 40}],
+}
+
+
+def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
+    """Labels sized to SPSS's limits, which are the smaller pair, so neither format cuts them."""
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    codes: list[Code] = [{"value": 1, "label": "€" * 40}]  # exactly 120 bytes
+    meta = Metadata(
+        variable_labels={"v": "ø" * 128},  # exactly 256 bytes
+        value_labels={"v": codes},
+        file_label="x" * 64,
+    )
+    table = pa.table({"v": pa.array([1.0])})
+    out = io.BytesIO()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
+        write(out, table, meta)
+    out.seek(0)
+    _, back = read(out)
+
+    assert back.variable_labels["v"] == "ø" * 128
+    assert back.value_labels["v"] == UNTOUCHED_CODES[fmt]
+    assert back.file_label == "x" * 64
+
+
+# Tests of one format alone: a file, a record or a rule the other format has no equivalent of.
+# Nothing below takes ``fmt``; each says in its name which format it is about.
+
+
 def test_write_sav_roundtrip() -> None:
     table, meta = _survey()
     out = io.BytesIO()
@@ -144,18 +602,6 @@ def test_write_dta_roundtrip() -> None:
     assert back_meta.formats["when"] == "%tc"
 
 
-def test_write_and_read_a_path(tmp_path: Path) -> None:
-    table, meta = _survey()
-    out = tmp_path / "out.sav"
-
-    readstat_arrow.write_sav(out, table, meta)
-    back, back_meta = readstat_arrow.read_sav(out)
-
-    assert out.exists()
-    assert back.equals(table)
-    assert back_meta.file_label == "Tiny survey"
-
-
 def test_sav_metadata_into_dta_drops_spss_formats() -> None:
     table, meta = _survey()  # metadata full of SPSS formats: F8.2, DATE11, TIME8, ...
     out = io.BytesIO()
@@ -172,7 +618,7 @@ def test_sav_metadata_into_dta_drops_spss_formats() -> None:
     assert back_meta.formats["mytime"] == "%tcHH:MM:SS"
 
 
-def test_preserve_user_missing_values_roundtrip() -> None:
+def test_sav_preserve_user_missing_values_roundtrip() -> None:
     """SPSS user-missing values stay in the data and keep their declarations."""
     table = pa.table(
         {
@@ -202,93 +648,7 @@ def test_preserve_user_missing_values_roundtrip() -> None:
     }
 
 
-def test_sav_writer_in_batches() -> None:
-    table, meta = _survey()
-    out = io.BytesIO()
-
-    with readstat_arrow.SavWriter(out, table.schema, table.num_rows, meta) as writer:
-        writer.write_table(table.slice(0, 2))
-        writer.write_batch(table.slice(2).to_batches()[0])
-        assert writer.rows_written == 5
-
-    out.seek(0)
-    back, _ = readstat_arrow.read_sav(out)
-    assert back.equals(table)
-
-
-def test_writer_leaves_the_callers_file_object_open() -> None:
-    table, meta = _panel()
-    out = io.BytesIO()
-
-    with readstat_arrow.DtaWriter(out, table.schema, table.num_rows, meta) as writer:
-        writer.write_table(table)
-
-    assert not out.closed  # caller's file object is left open
-    out.seek(0)
-    assert out.read(4) == b"<sta"  # Stata 118 XML-ish header
-
-
-def test_writer_rejects_wrong_schema() -> None:
-    table, meta = _survey()
-
-    with readstat_arrow.SavWriter(io.BytesIO(), table.schema, table.num_rows, meta) as writer:
-        with pytest.raises(ValueError, match="schema"):
-            writer.write_table(table.select(["mychar"]))
-        writer.write_table(table)
-
-
-def test_writer_enforces_row_count() -> None:
-    table, meta = _survey()
-
-    writer = readstat_arrow.SavWriter(io.BytesIO(), table.schema, 3, meta)
-    with pytest.raises(readstat_arrow.ReadstatError, match="3 rows"):
-        writer.write_table(table)
-
-    writer = readstat_arrow.SavWriter(io.BytesIO(), table.schema, 10, meta)
-    writer.write_table(table)
-    with pytest.raises(readstat_arrow.ReadstatError):
-        writer.close()
-
-
-def test_writer_rejects_a_negative_row_count() -> None:
-    table, _meta = _survey()
-    with pytest.raises(ValueError, match="row_count must be non-negative"):
-        readstat_arrow.SavWriter(io.BytesIO(), table.schema, -1)
-
-
-def test_close_is_idempotent() -> None:
-    """Closing twice is not an error; the second call has nothing left to finish."""
-    table, meta = _survey()
-    out = io.BytesIO()
-
-    writer = readstat_arrow.SavWriter(out, table.schema, table.num_rows, meta)
-    writer.write_table(table)
-    writer.close()
-    writer.close()
-
-    out.seek(0)
-    back, _back_meta = readstat_arrow.read_sav(out)
-    assert back.equals(table)
-
-
-def test_a_failed_write_leaves_no_finished_file(tmp_path: Path) -> None:
-    """Leaving the block with an exception closes the file without ending the format properly."""
-    table, meta = _survey()
-    out = tmp_path / "partial.sav"
-
-    with (
-        pytest.raises(RuntimeError, match="boom"),
-        readstat_arrow.SavWriter(out, table.schema, table.num_rows, meta) as writer,
-    ):
-        writer.write_table(table.slice(0, 2))
-        raise RuntimeError("boom")
-
-    assert out.exists()  # what was written stays on disk ...
-    with pytest.raises(readstat_arrow.ReadstatError):  # ... but it does not read as a whole file
-        readstat_arrow.read_sav(out)
-
-
-def test_write_from_scratch() -> None:
+def test_sav_write_from_scratch() -> None:
     """Building metadata by hand, without reading a file first."""
     meta = Metadata(
         variable_labels={"id": "Respondent id", "agree": "Agrees with statement"},
@@ -312,56 +672,7 @@ def test_write_from_scratch() -> None:
     ]  # SPSS: doubles
 
 
-def test_columns_without_metadata_are_written_undeclared() -> None:
-    """A column with no metadata is written anyway; metadata for absent columns is ignored."""
-    table = pa.table({"num": pa.array([1.0, 2.0]), "text": pa.array(["x", "yy"])})
-    meta = Metadata(
-        variable_labels={"num": "Numbers", "gone": "Not here"},
-        file_label="Partly described",
-    )
-    out = io.BytesIO()
-
-    readstat_arrow.write_sav(out, table, meta)
-    out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out)
-
-    assert back.to_pydict() == {"num": [1.0, 2.0], "text": ["x", "yy"]}
-    assert back.column_names == ["num", "text"]
-    assert back_meta.variable_labels == {"num": "Numbers"}  # "gone" ignored, "text" declared nothing
-    assert back_meta.value_labels == {}
-    assert back_meta.file_label == "Partly described"
-
-
-def test_none_declares_nothing() -> None:
-    """A name mapped to None is exactly as undeclared as a name that is absent."""
-    table = pa.table({"n": pa.array([1.0]), "s": pa.array(["ab"], pa.large_string())})
-    meta = Metadata(
-        variable_labels={"n": None, "s": "Text"},
-        value_labels={"n": None},
-        formats={"n": None},
-        storage_widths={"s": None},
-        measures={"n": None},
-        display_widths={"n": None},
-        missing_values={"n": None},
-    )
-    nones = io.BytesIO()
-    readstat_arrow.write_sav(nones, table, meta)
-    nones.seek(0)
-    bare, bare_meta = readstat_arrow.read_sav(nones)
-
-    empty = io.BytesIO()
-    readstat_arrow.write_sav(empty, table, Metadata(variable_labels={"s": "Text"}))
-    empty.seek(0)
-    same, same_meta = readstat_arrow.read_sav(empty)
-
-    assert bare.equals(same)
-    assert bare_meta == same_meta
-    assert bare_meta.variable_labels == {"s": "Text"}
-    assert bare_meta.value_labels == {}
-    assert bare_meta.storage_widths["s"] == 2  # sized from the data, as with no entry at all
-
-
-def test_empty_missing_values_list_declares_nothing() -> None:
+def test_sav_empty_missing_values_list_declares_nothing() -> None:
     """``{"values": []}`` is as empty as ``None``; only more than three is an error."""
     table = pa.table({"q": pa.array([1.0])})
 
@@ -374,7 +685,7 @@ def test_empty_missing_values_list_declares_nothing() -> None:
         assert back_meta.missing_values == {}
 
 
-def test_too_many_discrete_missing_raises() -> None:
+def test_sav_too_many_discrete_missing_raises() -> None:
     """More than three discrete missing values for a column raises an error."""
     table = pa.table({"q": pa.array([1.0])})
     too_many = Metadata(missing_values={"q": {"values": [1.0, 2.0, 3.0, 4.0]}})
@@ -385,7 +696,7 @@ def test_too_many_discrete_missing_raises() -> None:
     assert out.getvalue() == b""  # planning happens before anything is written
 
 
-def test_missing_values_must_be_one_of_the_two_shapes() -> None:
+def test_sav_missing_values_must_be_one_of_the_two_shapes() -> None:
     """``Missingness`` is a TypedDict, so its shape is only checked when it is used."""
     table = pa.table({"q": pa.array([1.0])})
     malformed = Metadata(missing_values={"q": t.cast(Missingness, {"low": 1.0, "high": 2.0})})
@@ -394,7 +705,7 @@ def test_missing_values_must_be_one_of_the_two_shapes() -> None:
         readstat_arrow.write_sav(io.BytesIO(), table, malformed)
 
 
-def test_stata_cannot_store_user_defined_missing_values() -> None:
+def test_dta_cannot_store_user_defined_missing_values() -> None:
     """Stata has tagged missings instead; an SPSS declaration has nowhere to go."""
     table = pa.table({"q": pa.array([1.0])})
     declared: list[Missingness] = [{"values": [9.0]}, {"lo": 8.0, "hi": 9.0}]
@@ -405,78 +716,12 @@ def test_stata_cannot_store_user_defined_missing_values() -> None:
             readstat_arrow.write_dta(io.BytesIO(), table, meta)
 
 
-def test_missing_values_of_a_string_variable_must_be_strings() -> None:
+def test_sav_missing_values_of_a_string_variable_must_be_strings() -> None:
     table = pa.table({"s": pa.array(["a"], pa.large_string())})
     meta = Metadata(missing_values={"s": {"values": ["Z", 9.0]}})
 
     with pytest.raises(ValueError, match=r"'s'.*must be strings"):
         readstat_arrow.write_sav(io.BytesIO(), table, meta)
-
-
-def test_write_without_metadata() -> None:
-    """No metadata at all: the columns keep their Arrow names and nothing else is declared."""
-    table = pa.table({"n": pa.array([1, 2], pa.int8()), "s": pa.array(["a", "b"])})
-    sav_out, dta_out = io.BytesIO(), io.BytesIO()
-
-    readstat_arrow.write_sav(sav_out, table)
-    readstat_arrow.write_dta(dta_out, table, Metadata())  # same thing, spelled out
-    sav_out.seek(0)
-    dta_out.seek(0)
-
-    sav, sav_meta = readstat_arrow.read_sav(sav_out)
-    dta, dta_meta = readstat_arrow.read_dta(dta_out)
-    assert sav.to_pydict() == {"n": [1.0, 2.0], "s": ["a", "b"]}  # SPSS: doubles
-    assert dta.to_pydict() == {"n": [1, 2], "s": ["a", "b"]}
-    assert sav.column_names == dta.column_names == ["n", "s"]
-    for meta in (sav_meta, dta_meta):
-        assert meta.variable_labels == {}
-        assert meta.file_label is None
-
-
-def test_string_widths_survive_repeated_round_trips() -> None:
-    """Metadata from a file must write the same widths back, or they creep up every cycle.
-
-    ReadStat reports a string's storage as the format lays it out - SPSS in whole
-    8-byte cells, Stata with a byte for a possible NUL - so the reader normalises
-    it back to the declared width before it can be fed to a writer again.
-    """
-    table = pa.table({"s3": pa.array(["abc"]), "s20": pa.array(["x" * 20])})  # "long" is Stata-reserved
-    cases: list[tuple[FileFormat, t.Any, t.Any, t.Any]] = [
-        ("sav", readstat_arrow.write_sav, readstat_arrow.SavWriter, readstat_arrow.read_sav),
-        ("dta", readstat_arrow.write_dta, readstat_arrow.DtaWriter, readstat_arrow.read_dta),
-    ]
-    for fmt, write, Writer, read in cases:
-        out = io.BytesIO()
-        write(out, table)  # sizes the columns from the data
-        widths = []
-        for _ in range(3):  # then keep rewriting with nothing but what was read back
-            out.seek(0)
-            data, meta = read(out)
-            widths.append([meta.storage_widths[n] for n in data.column_names])
-            out = io.BytesIO()
-            with Writer(out, data.schema, data.num_rows, meta) as writer:
-                writer.write_table(data)
-
-        assert widths == [[3, 20]] * 3, f"{fmt} widths drifted: {widths}"
-
-
-def test_incremental_writer_without_metadata() -> None:
-    table = pa.table({"n": pa.array([1.0, 2.0])})
-    out = io.BytesIO()
-
-    with readstat_arrow.SavWriter(out, table.schema, table.num_rows) as writer:
-        writer.write_table(table)
-
-    out.seek(0)
-    back, _meta = readstat_arrow.read_sav(out)
-    assert back.to_pydict() == {"n": [1.0, 2.0]}
-    assert back.column_names == ["n"]
-
-
-def test_unsupported_arrow_type() -> None:
-    table = pa.table({"nested": pa.array([[1, 2], [3]])})
-    with pytest.raises(TypeError, match="nested"):
-        readstat_arrow.write_sav(io.BytesIO(), table)
 
 
 def test_write_dta_widens_integers_in_reserved_ranges() -> None:
@@ -545,56 +790,7 @@ def test_dta_writer_widens_from_declared_ranges() -> None:
     assert back.column("tagged").to_pylist() == [1, 101]
 
 
-def test_all_null_columns() -> None:
-    """Entirely empty columns (common in survey data) take a fast path in the writer."""
-    table = pa.table(
-        {
-            "num": pa.array([None, None, None], pa.float64()),
-            "txt": pa.array([None, None, None], pa.large_string()),
-            "typed_null": pa.array([None, None, None], pa.null()),
-            "filled": pa.array([1.0, 2.0, 3.0]),
-        }
-    )
-    sav_out, dta_out = io.BytesIO(), io.BytesIO()
-
-    readstat_arrow.write_sav(sav_out, table)
-    sav_out.seek(0)
-    back, _ = readstat_arrow.read_sav(sav_out)
-    assert back.to_pydict() == {
-        "num": [None, None, None],
-        "txt": ["", "", ""],  # SPSS has no null string
-        "typed_null": [None, None, None],
-        "filled": [1.0, 2.0, 3.0],
-    }
-
-    readstat_arrow.write_dta(dta_out, table.drop_columns("txt"))
-    dta_out.seek(0)
-    back, _ = readstat_arrow.read_dta(dta_out)
-    assert back.column("num").null_count == 3
-    assert back.column("typed_null").null_count == 3
-
-
-TAG_TYPE = pa.dictionary(pa.int8(), pa.string())
-TAG_LETTERS = pa.array([chr(c) for c in range(ord("a"), ord("z") + 1)])
-
-
-def _tagged(values: list[int | None], tags: list[str | None]) -> pa.StructArray:
-    """struct<value: int8, tag> exactly as read_dta(preserve_user_missing=True) builds it.
-
-    The tag dictionary is always the full a-z alphabet (Array.equals compares
-    dictionaries, not just decoded values); a null struct where both are None.
-    """
-    value_array = pa.array(values, pa.int8())
-    indices = pa.array([None if t is None else ord(t) - ord("a") for t in tags], pa.int8())
-    tag_array = pa.DictionaryArray.from_arrays(indices, TAG_LETTERS)
-    return pa.StructArray.from_arrays(
-        [value_array, tag_array],
-        names=["value", "tag"],
-        mask=pc.and_(value_array.is_null(), tag_array.is_null()),
-    )
-
-
-def test_stata_tagged_missing_roundtrip() -> None:
+def test_dta_tagged_missing_roundtrip() -> None:
     """{value: null, tag: 'a'} becomes .a, a null struct becomes '.', values pass through."""
     table = pa.table({"v": _tagged([1, None, None, None], [None, "a", None, "z"])})
     out = io.BytesIO()
@@ -609,7 +805,7 @@ def test_stata_tagged_missing_roundtrip() -> None:
     assert plain.column("v").to_pylist() == [1, None, None, None]  # every kind of missing is null
 
 
-def test_stata_labelled_tags() -> None:
+def test_dta_labelled_tags() -> None:
     """A label set can label the tagged missings .a-.z alongside ordinary values."""
     codes: list[Code] = [
         {"value": 1, "label": "Yes"},
@@ -628,27 +824,6 @@ def test_stata_labelled_tags() -> None:
     assert back_meta.value_labels["q"] == codes
 
 
-def test_an_empty_code_list_writes_no_label_set() -> None:
-    """A label set with no codes in it corrupts a .sav, so an empty list must write nothing."""
-    table = pa.table({"q": pa.array([1, 2], pa.int32())})
-    cases: list[tuple[FileFormat, t.Any, t.Any]] = [
-        ("sav", readstat_arrow.write_sav, readstat_arrow.read_sav),
-        ("dta", readstat_arrow.write_dta, readstat_arrow.read_dta),
-    ]
-    for fmt, write, read in cases:
-        empty, nothing = io.BytesIO(), io.BytesIO()
-        write(empty, table, Metadata(value_labels={"q": []}))
-        write(nothing, table, Metadata())  # no entry for "q" at all
-
-        # Byte for byte the same file: no set was created, and none was referenced.
-        assert empty.getvalue() == nothing.getvalue(), fmt
-        empty.seek(0)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-            _back, back_meta = read(empty)
-        assert back_meta.value_labels == {}
-
-
 def test_sav_string_value_labels_roundtrip() -> None:
     """SPSS labels the values of a string variable too, so a code list may be all strings."""
     table = pa.table({"s": pa.array(["a", "b"], pa.large_string())})
@@ -663,7 +838,7 @@ def test_sav_string_value_labels_roundtrip() -> None:
     assert back_meta.value_labels == {"s": codes}
 
 
-def test_a_code_list_cannot_mix_strings_and_numbers() -> None:
+def test_sav_code_list_cannot_mix_strings_and_numbers() -> None:
     """One label set is one type: SPSS labels either string values or numeric ones."""
     table = pa.table({"s": pa.array(["a"], pa.large_string())})
     mixed = Metadata(value_labels={"s": [{"value": "a", "label": "Apple"}, {"value": 1, "label": "One"}]})
@@ -672,7 +847,7 @@ def test_a_code_list_cannot_mix_strings_and_numbers() -> None:
         readstat_arrow.write_sav(io.BytesIO(), table, mixed)
 
 
-def test_stata_labels_only_integers_and_tags() -> None:
+def test_dta_labels_only_integers_and_tags() -> None:
     """Stata keys a label set with an int32, or with a tag letter for a missing value."""
     table = pa.table({"v": pa.array([1.0])})
 
@@ -682,7 +857,7 @@ def test_stata_labels_only_integers_and_tags() -> None:
             readstat_arrow.write_dta(io.BytesIO(), table, bad)
 
 
-def test_stata_value_label_keys_stop_where_a_long_does() -> None:
+def test_dta_value_label_keys_stop_where_a_long_does() -> None:
     """Label keys are int32 whatever the variable's type, and the top of it means missing.
 
     2_147_483_621 upwards is how a ``.dta`` encodes ``.`` and ``.a``-``.z``, so a
@@ -703,7 +878,7 @@ def test_stata_value_label_keys_stop_where_a_long_does() -> None:
             readstat_arrow.write_dta(io.BytesIO(), table, bad)
 
 
-def test_tag_structs_rejected_for_spss_and_strings() -> None:
+def test_sav_rejects_tag_structs_and_dta_rejects_string_ones() -> None:
     table = pa.table({"v": _tagged([None], ["a"])})
     with pytest.raises(ValueError, match="tagged missing"):
         readstat_arrow.write_sav(io.BytesIO(), table)
@@ -714,7 +889,7 @@ def test_tag_structs_rejected_for_spss_and_strings() -> None:
         readstat_arrow.write_dta(io.BytesIO(), table)
 
 
-def test_tag_struct_validation() -> None:
+def test_dta_tag_struct_validation() -> None:
     both = pa.StructArray.from_arrays(
         [pa.array([1], pa.int8()), pa.array(["a"], TAG_TYPE)], names=["value", "tag"]
     )
@@ -730,7 +905,7 @@ def test_tag_struct_validation() -> None:
         readstat_arrow.write_dta(io.BytesIO(), table)
 
 
-def test_tag_structs_are_widened_like_plain_columns() -> None:
+def test_dta_tag_structs_are_widened_like_plain_columns() -> None:
     table = pa.table({"v": _tagged([1, 101, None], [None, None, "a"])})  # 101 is not a legal Stata byte
     out = io.BytesIO()
 
@@ -746,7 +921,7 @@ def test_tag_structs_are_widened_like_plain_columns() -> None:
     ]
 
 
-def test_spss_integer_columns_default_to_no_decimals() -> None:
+def test_sav_integer_columns_default_to_no_decimals() -> None:
     """Every SPSS numeric is a double in the file, so ReadStat's own default shows a count as 1.00."""
     table = pa.table(
         {
@@ -773,7 +948,7 @@ def test_spss_integer_columns_default_to_no_decimals() -> None:
     }
 
 
-def test_spss_formats_and_display_width_survive() -> None:
+def test_sav_formats_and_display_width_survive() -> None:
     meta = Metadata(
         formats={"restricted": "N4", "integer": "F1.0", "text": "A3"},
         display_widths={"restricted": 12, "text": 20},
@@ -791,7 +966,7 @@ def test_spss_formats_and_display_width_survive() -> None:
     assert back_meta.display_widths["text"] == 20
 
 
-def test_string_user_missing_roundtrip() -> None:
+def test_sav_string_user_missing_roundtrip() -> None:
     """SPSS lets a string variable declare missing values too.
 
     Three of them, non-ASCII: ReadStat keeps the ``const char *`` it is handed
@@ -813,7 +988,7 @@ def test_string_user_missing_roundtrip() -> None:
     assert nulled.column("mychar").to_pylist() == [None, "a", None, None]
 
 
-def test_rename_invalid_names() -> None:
+def test_dta_rename_invalid_names() -> None:
     """Stata's rules are the strict pair: letters, digits and _, 32 characters, reserved words."""
     names = ["ok", "my var", "1st", "int", "str8", "a.b", "a b", "a_b", "kjønn", "x" * 40]
     table = pa.table({name: pa.array([1.0]) for name in names})
@@ -845,7 +1020,7 @@ def test_rename_invalid_names() -> None:
     assert back_meta.value_labels == {"v1st": [{"value": 1, "label": "one"}]}
 
 
-def test_rename_invalid_names_is_off_by_default_and_reported() -> None:
+def test_sav_and_dta_rename_invalid_names_is_off_by_default_and_reported() -> None:
     table = pa.table({"my var": pa.array([1.0])})
 
     with pytest.raises(readstat_arrow.ReadstatError, match="writing header"):
@@ -868,38 +1043,7 @@ def test_rename_invalid_names_is_off_by_default_and_reported() -> None:
     assert back.column_names == ["my_var"]
 
 
-def test_rename_invalid_names_says_nothing_when_nothing_is_renamed() -> None:
-    table = pa.table({"ok": pa.array([1.0]), "also_ok": pa.array([2.0])})
-    out = io.BytesIO()
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-        writer = readstat_arrow.DtaWriter(out, table.schema, 1, rename_invalid_names=True)
-        writer.write_table(table)
-        writer.close()
-
-    assert writer.renamed_variables == {}
-    out.seek(0)
-    back, _meta = readstat_arrow.read_dta(out)
-    assert back.column_names == ["ok", "also_ok"]
-
-
-def test_invalid_variable_names_are_reported_as_header_errors() -> None:
-    """ReadStat validates names when it emits the header, which happens at the first row."""
-    cases: list[tuple[FileFormat, str]] = [
-        ("sav", "with space"),
-        ("dta", "1leading_digit"),
-        ("sav", "x" * 70),
-    ]
-    for fmt, bad_name in cases:
-        table = pa.table({bad_name: [1.0]})
-        write = readstat_arrow.write_sav if fmt == "sav" else readstat_arrow.write_dta
-        with pytest.raises(readstat_arrow.ReadstatError, match="writing header") as info:
-            write(io.BytesIO(), table)
-        assert "row 0" not in str(info.value)
-
-
-def test_arrow_type_mapping() -> None:
+def test_sav_and_dta_arrow_type_mapping() -> None:
     table = pa.table(
         {
             "b": pa.array([True, False, None]),
@@ -926,102 +1070,3 @@ def test_arrow_type_mapping() -> None:
     sav_out.seek(0)
     back, _ = readstat_arrow.read_sav(sav_out)
     assert back.schema.types == [pa.float64()] * 4  # SPSS numbers are all doubles
-
-
-def test_temporal_type_variants() -> None:
-    table = pa.table(
-        {
-            "ts_tz": pa.array([1_600_000_000_000_000_000, None], pa.timestamp("ns", tz="Europe/Oslo")),
-            "d64": pa.array([0, 86_400_000], pa.date64()),
-            "dur": pa.array([90_000_000_000, None], pa.duration("us")),  # 25 hours: beyond time64's day
-        }
-    )
-    out = io.BytesIO()
-
-    readstat_arrow.write_sav(out, table)
-    out.seek(0)
-    back, _ = readstat_arrow.read_sav(out)
-
-    assert back.schema.types == [pa.timestamp("us"), pa.date32(), pa.duration("us")]
-    assert back.to_pydict() == {
-        "ts_tz": [datetime(2020, 9, 13, 12, 26, 40), None],  # the UTC instant; SPSS has no timezone
-        "d64": [date(1970, 1, 1), date(1970, 1, 2)],
-        "dur": [timedelta(days=1, hours=1), None],
-    }
-
-
-def test_zero_rows() -> None:
-    table = pa.table({"a": pa.array([], pa.float64()), "s": pa.array([], pa.large_string())})
-    cases: list[tuple[FileFormat, t.Any, t.Any]] = [
-        ("sav", readstat_arrow.write_sav, readstat_arrow.read_sav),
-        ("dta", readstat_arrow.write_dta, readstat_arrow.read_dta),
-    ]
-    for fmt, write, read in cases:
-        out = io.BytesIO()
-        write(out, table)
-        out.seek(0)
-        back, _ = read(out)
-        assert back.num_rows == 0, fmt
-        assert back.column_names == ["a", "s"]
-
-
-def test_long_labels_are_truncated_on_character_boundaries() -> None:
-    """Limits are in UTF-8 bytes; the cut must never leave half a multibyte character."""
-    long_variable_label = "ø" * 300  # 600 bytes
-    long_value_label = "€" * 100  # 300 bytes
-    long_file_label = "日本語" * 40  # 360 bytes
-    codes: list[Code] = [{"value": 1, "label": long_value_label}]
-    table = pa.table({"v": pa.array([1], pa.int8())})
-
-    for write, read, limits in (
-        (readstat_arrow.write_sav, readstat_arrow.read_sav, (256, 120, 64)),
-        (readstat_arrow.write_dta, readstat_arrow.read_dta, (320, 32_000, 256)),
-    ):
-        meta = Metadata(
-            variable_labels={"v": long_variable_label},
-            value_labels={"v": codes},
-            file_label=long_file_label,
-        )
-        out = io.BytesIO()
-        with pytest.warns(readstat_arrow.ReadstatWarning, match="truncated"):
-            write(out, table, meta)
-        out.seek(0)
-        _, back = read(out)
-
-        var_limit, value_limit, file_limit = limits
-        _assert_fitted(back.variable_labels["v"], long_variable_label, var_limit)
-        back_codes = back.value_labels.get("v")
-        assert back_codes is not None  # the label survived, however much of it fitted
-        _assert_fitted(back_codes[0]["label"], long_value_label, value_limit)
-        _assert_fitted(back.file_label, long_file_label, file_limit)
-
-
-def _assert_fitted(actual: str | None, original: str, limit: int) -> None:
-    """``actual`` is the longest whole-character prefix of ``original`` within ``limit`` bytes."""
-    assert actual is not None
-    assert original.startswith(actual)
-    assert len(actual.encode()) <= limit
-    if actual != original:
-        next_char = original[len(actual)]
-        assert len(actual.encode()) + len(next_char.encode()) > limit  # nothing more would have fit
-
-
-def test_labels_within_limits_are_untouched() -> None:
-    codes: list[Code] = [{"value": 1, "label": "€" * 40}]  # exactly 120 bytes: SPSS's limit
-    meta = Metadata(
-        variable_labels={"v": "ø" * 128},  # exactly 256 bytes
-        value_labels={"v": codes},
-        file_label="x" * 64,
-    )
-    table = pa.table({"v": pa.array([1.0])})
-    out = io.BytesIO()
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-        readstat_arrow.write_sav(out, table, meta)
-    out.seek(0)
-    _, back = readstat_arrow.read_sav(out)
-
-    assert back.variable_labels["v"] == "ø" * 128
-    assert back.value_labels["v"] == [{"value": 1.0, "label": "€" * 40}]
-    assert back.file_label == "x" * 64

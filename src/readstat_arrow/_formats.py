@@ -3,3 +3,4 @@
 import typing as t
 
 FileFormat = t.Literal["sav", "dta"]
+file_format_values = t.get_args(FileFormat)
