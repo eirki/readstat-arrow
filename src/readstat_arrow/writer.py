@@ -33,7 +33,14 @@ import pyarrow.compute as pc
 
 from readstat_arrow import _dates
 from readstat_arrow._cython import writer as _writer
-from readstat_arrow._formats import FileFormat
+from readstat_arrow._formats import (
+    DISPLAY_NAME,
+    SUPPORTS_TAGGED_MISSING,
+    SUPPORTS_USER_MISSING,
+    FileFormat,
+    FormatMap,
+    is_native_format,
+)
 from readstat_arrow.errors import ReadstatWarning
 from readstat_arrow.metadata import Metadata, Missingness, Value
 
@@ -57,7 +64,7 @@ _ALIGNMENT = {"unknown": 0, "left": 1, "center": 2, "right": 3}
 # Maximum length, in UTF-8 bytes, of the free-text fields each format can store.
 # Longer text is truncated at a character boundary (ReadStat itself would cut
 # mid-character) and a ReadstatWarning is emitted.
-_TEXT_LIMITS: dict[FileFormat, dict[str, int]] = {
+_TEXT_LIMITS: FormatMap[dict[str, int]] = {
     "sav": {"variable label": 256, "value label": 120, "file label": 64},
     # Stata 118 allows 320 bytes for the dataset label too, but ReadStat's writer holds
     # it in a 256-byte buffer, so that is the effective limit.
@@ -71,7 +78,14 @@ _TEXT_LIMITS: dict[FileFormat, dict[str, int]] = {
 _LABEL_KEY_MIN, _LABEL_KEY_MAX = -2_147_483_647, 2_147_483_620
 
 # Storage width for string columns when neither the metadata nor the caller says.
-_DEFAULT_STRING_WIDTH: dict[FileFormat, int] = {"sav": 255, "dta": 244}
+_DEFAULT_STRING_WIDTH: FormatMap[int] = {"sav": 255, "dta": 244}
+
+# The kind each temporal column is stored as: a Stata date is a whole number of days,
+# everything else a double (and every SPSS numeric is a double in the first place).
+_TEMPORAL_KIND: FormatMap[_dates.TemporalMap[int]] = {
+    "sav": {"date": _K_DOUBLE, "datetime": _K_DOUBLE, "time": _K_DOUBLE, "duration": _K_DOUBLE},
+    "dta": {"date": _K_INT32, "datetime": _K_DOUBLE, "time": _K_DOUBLE, "duration": _K_DOUBLE},
+}
 
 # Stata's native numeric types; everything else is widened or stored as double.
 _DTA_KIND: dict[t.Any, int] = {
@@ -328,6 +342,41 @@ def write_dta(
 # ---------------------------------------------------------------------------
 
 
+def _numeric_kind(file_format: FileFormat, typ: pa.DataType, value_range: tuple[int, int] | None) -> int:
+    """The writer kind a numeric (or boolean, or null) column is stored as.
+
+    ``value_range`` is the column's actual minimum and maximum, when the data is in
+    hand: Stata's integer types have narrower bounds than Arrow's, so a column that
+    does not fit its own type's Stata counterpart is widened to one that holds it.
+    """
+    if file_format == "dta":
+        if value_range is not None and pa.types.is_integer(typ):
+            widened = _stata_int_type(typ, *value_range)
+            if widened is not None:
+                return _DTA_KIND.get(widened, _K_DOUBLE)
+        return _DTA_KIND.get(typ, _K_DOUBLE)
+    elif file_format == "sav":
+        return _K_DOUBLE  # every SPSS numeric is a double
+    else:
+        t.assert_never(file_format)
+
+
+def _default_numeric_format(
+    file_format: FileFormat, typ: pa.DataType, display_width: int | None
+) -> str | None:
+    """The display format a numeric column gets when the metadata declares none."""
+    if file_format == "dta":
+        return None  # ReadStat's own default follows the storage type, which is right
+    elif file_format == "sav":
+        if pa.types.is_floating(typ):
+            return None
+        # Every SPSS numeric is a double in the file, so ReadStat's own default
+        # is F8.2 - which shows a count as "1.00". Integers get no decimals.
+        return f"F{display_width or 8}.0"
+    else:
+        t.assert_never(file_format)
+
+
 class _ColumnPlan:
     """How one Arrow column becomes one ReadStat variable."""
 
@@ -363,23 +412,24 @@ class _ColumnPlan:
         typ = field.type
         tagged = _is_tag_struct(typ)
         if tagged:
-            if file_format == "sav":
+            if not SUPPORTS_TAGGED_MISSING[file_format]:
                 raise ValueError(
-                    f"column {field.name!r}: SPSS files cannot store tagged missing values (.a-.z)"
+                    f"column {field.name!r}: {DISPLAY_NAME[file_format]} files cannot store "
+                    "tagged missing values (.a-.z)"
                 )
             typ = typ.field("value").type
 
         temporal = _dates.kind_of_type(typ)
         fmt = metadata.formats.get(name)
-        if fmt and (file_format == "dta") != fmt.startswith("%"):
-            fmt = None  # a format from the other family (e.g. SPSS "F8.2" into Stata); let ReadStat default
+        if fmt and not is_native_format(file_format, fmt):
+            fmt = None  # e.g. an SPSS "F8.2" carried into a Stata file; let ReadStat default
         if temporal is not None:
             fmt = (
                 fmt
                 if fmt and _dates.classify(file_format, fmt) == temporal
                 else _dates.DEFAULT_FORMAT[file_format][temporal]
             )
-            kind = _K_INT32 if (file_format == "dta" and temporal == "date") else _K_DOUBLE
+            kind = _TEMPORAL_KIND[file_format][temporal]
         elif pa.types.is_string(typ) or pa.types.is_large_string(typ):
             kind = _K_STRING
         elif (
@@ -388,15 +438,9 @@ class _ColumnPlan:
             or pa.types.is_floating(typ)
             or pa.types.is_boolean(typ)
         ):
-            kind = _K_DOUBLE if file_format == "sav" else _DTA_KIND.get(typ, _K_DOUBLE)
-            if value_range is not None and file_format == "dta" and pa.types.is_integer(typ):
-                lo, hi = value_range
-                widened = _stata_int_type(typ, lo, hi)
-                kind = _DTA_KIND.get(widened, _K_DOUBLE) if widened is not None else kind
-            if fmt is None and file_format == "sav" and not pa.types.is_floating(typ):
-                # Every SPSS numeric is a double in the file, so ReadStat's own default
-                # is F8.2 - which shows a count as "1.00". Integers get no decimals.
-                fmt = f"F{metadata.display_widths.get(name) or 8}.0"
+            kind = _numeric_kind(file_format, typ, value_range)
+            if fmt is None:
+                fmt = _default_numeric_format(file_format, typ, metadata.display_widths.get(name))
         else:
             raise TypeError(f"column {field.name!r}: cannot write Arrow type {typ} to a {file_format} file")
 
@@ -407,9 +451,10 @@ class _ColumnPlan:
 
         discrete, span = _missing_parts(metadata.missing_values.get(name), name)
         if discrete or span is not None:
-            if file_format == "dta":
+            if not SUPPORTS_USER_MISSING[file_format]:
                 raise ValueError(
-                    f"column {field.name!r}: Stata files cannot store SPSS user-defined missing values"
+                    f"column {field.name!r}: {DISPLAY_NAME[file_format]} files cannot store "
+                    "SPSS user-defined missing values"
                 )
             if kind == _K_STRING and not all(isinstance(v, str) for v in [*discrete, *(span or ())]):
                 raise ValueError(
@@ -463,7 +508,7 @@ _STATA_STR_TYPE = re.compile(r"str\d", re.IGNORECASE)
 # What each format accepts in a variable name, for _sanitised_names. ReadStat
 # checks its own version of these when it writes the header (and is laxer than
 # Stata on length: it allows 129 bytes where Stata 118 allows 32 characters).
-_NAME_RULES: dict[FileFormat, dict[str, t.Any]] = {
+_NAME_RULES: FormatMap[dict[str, t.Any]] = {
     "sav": {
         "extra": "._$@#",
         "first": "@",
@@ -503,7 +548,6 @@ _NAME_RULES: dict[FileFormat, dict[str, t.Any]] = {
         "reserved_prefix": _STATA_STR_TYPE,
     },
 }
-_STATA_STR_TYPE = re.compile(r"str\d+$", re.IGNORECASE)
 
 
 def _sanitised_names(names: Sequence[str], file_format: FileFormat) -> dict[str, str]:

@@ -14,7 +14,7 @@ import pyarrow.compute as pc
 
 from readstat_arrow import _dates
 from readstat_arrow._cython import parser as _parser
-from readstat_arrow._formats import FileFormat
+from readstat_arrow._formats import SUPPORTS_TAGGED_MISSING, FileFormat
 from readstat_arrow.errors import ReadstatWarning
 from readstat_arrow.metadata import Metadata
 
@@ -211,7 +211,7 @@ def _read_data(
     table = pa.Table.from_arrays(arrays, schema=table_schema)
 
     table = _convert_dates(table, metadata, file_format)
-    if preserve_user_missing and file_format == "dta":
+    if preserve_user_missing and SUPPORTS_TAGGED_MISSING[file_format]:
         table = _with_tag_structs(table, tags)
 
     return table, metadata

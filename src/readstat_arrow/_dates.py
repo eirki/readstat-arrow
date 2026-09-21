@@ -21,12 +21,25 @@ from datetime import date
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from readstat_arrow._formats import FileFormat
+from readstat_arrow._formats import FileFormat, FormatMap
 
 TemporalKind = t.Literal["date", "datetime", "time", "duration"]
 
+T = t.TypeVar("T")
+
+
+class TemporalMap(t.TypedDict, t.Generic[T]):
+    """One ``T`` per temporal kind, the way :class:`~readstat_arrow._formats.FormatMap`
+    holds one per file format."""
+
+    date: T
+    datetime: T
+    time: T
+    duration: T
+
+
 # The Arrow type :func:`convert` produces for each kind.
-TYPE_OF_KIND: dict[TemporalKind, pa.DataType] = {
+TYPE_OF_KIND: TemporalMap[pa.DataType] = {
     "date": pa.date32(),
     "datetime": pa.timestamp("us"),
     "time": pa.time64("us"),
@@ -35,28 +48,17 @@ TYPE_OF_KIND: dict[TemporalKind, pa.DataType] = {
 
 _UNIX_EPOCH = date(1970, 1, 1)
 
+# Microseconds per unit of the format's raw numbers: Stata counts milliseconds, SPSS
+# seconds. Multiply by this when reading, divide by it when writing.
+_MICROS_PER_UNIT: FormatMap[int] = {"sav": 1_000_000, "dta": 1_000}
 
-def _micros_per_unit(file_format: FileFormat) -> int:
-    """Microseconds per unit of the format's raw numbers: Stata counts milliseconds, SPSS seconds.
-
-    Multiply by this when reading, divide by it when writing.
-    """
-    if file_format == "dta":
-        return 1_000
-    elif file_format == "sav":
-        return 1_000_000
-    else:
-        t.assert_never(file_format)
+# The day each format counts its dates from.
+_EPOCH: FormatMap[date] = {"sav": date(1582, 10, 14), "dta": date(1960, 1, 1)}
 
 
 def _epoch_days(file_format: FileFormat) -> int:
     """Days from the format's epoch to the Unix epoch."""
-    if file_format == "dta":
-        return (_UNIX_EPOCH - date(1960, 1, 1)).days
-    elif file_format == "sav":
-        return (_UNIX_EPOCH - date(1582, 10, 14)).days
-    else:
-        t.assert_never(file_format)
+    return (_UNIX_EPOCH - _EPOCH[file_format]).days
 
 
 # SPSS format *names* (width/decimals stripped) that denote temporal values.
@@ -114,7 +116,7 @@ def convert(
 ) -> pa.Array | pa.ChunkedArray:
     """Convert a raw numeric column to the Arrow temporal type for ``kind``."""
     epoch_days = _epoch_days(file_format)
-    scale = _micros_per_unit(file_format)  # -> microseconds
+    scale = _MICROS_PER_UNIT[file_format]  # -> microseconds
 
     if kind == "date":
         if file_format == "sav":
@@ -157,7 +159,7 @@ def convert(
 
 # The display format each kind is written with. ``None`` means no format: Stata has nothing that
 # denotes elapsed time
-DEFAULT_FORMAT: dict[FileFormat, dict[TemporalKind, str | None]] = {
+DEFAULT_FORMAT: FormatMap[TemporalMap[str | None]] = {
     "sav": {"date": "DATE11", "datetime": "DATETIME20", "time": "TIME8", "duration": "DTIME11"},
     "dta": {"date": "%td", "datetime": "%tc", "time": "%tcHH:MM:SS", "duration": None},
 }
@@ -184,7 +186,7 @@ def to_raw(arr: pa.Array, file_format: FileFormat, kind: TemporalKind) -> pa.Arr
     stores a timezone.
     """
     epoch_days = _epoch_days(file_format)
-    divisor = _micros_per_unit(file_format)
+    divisor = _MICROS_PER_UNIT[file_format]
 
     if kind == "date":
         days = pc.cast(pc.cast(arr, pa.date32()), pa.int32())
