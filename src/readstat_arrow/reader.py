@@ -46,6 +46,10 @@ _READ_DOC = """
         reading stopped.
     columns:
         Names of the variables to read; ``None`` (default) reads all of them.
+    row_limit, row_offset:
+        Read at most ``row_limit`` rows, starting ``row_offset`` rows in. ``0`` means no limit.
+    encoding:
+        Override the character encoding declared in (or inferred from) the file.
     scan_and_narrow_types:
         Scan the values first, then read every numeric column at the narrowest
         type that holds the ones the scan found, rather than at the type the file
@@ -67,10 +71,6 @@ _READ_DOC = """
         value that does not fit the width measured for it raises
         :class:`~readstat_arrow.ReadstatError` rather than wrapping around, which
         no file that holds still between the two passes can provoke.
-    row_limit, row_offset:
-        Read at most ``row_limit`` rows, starting ``row_offset`` rows in. ``0`` means no limit.
-    encoding:
-        Override the character encoding declared in (or inferred from) the file.
     preserve_user_missing:
         Keep the file's user-level missing information instead of collapsing it
         to null. By default every kind of missing is an Arrow null. With ``True``:
@@ -97,10 +97,10 @@ def read_sav(
     where: PathLike | t.IO[bytes],
     *,
     columns: Iterable[str] | None = None,
-    scan_and_narrow_types: bool = False,
     row_limit: int = 0,
     row_offset: int = 0,
     encoding: str | None = None,
+    scan_and_narrow_types: bool = False,
     preserve_user_missing: bool = False,
 ) -> tuple[pa.Table, Metadata]:
     """Read an SPSS ``.sav`` file."""
@@ -108,10 +108,10 @@ def read_sav(
         where,
         "sav",
         columns,
-        scan_and_narrow_types,
         row_limit,
         row_offset,
         encoding,
+        scan_and_narrow_types,
         preserve_user_missing,
     )
 
@@ -120,10 +120,10 @@ def read_dta(
     where: PathLike | t.IO[bytes],
     *,
     columns: Iterable[str] | None = None,
-    scan_and_narrow_types: bool = False,
     row_limit: int = 0,
     row_offset: int = 0,
     encoding: str | None = None,
+    scan_and_narrow_types: bool = False,
     preserve_user_missing: bool = False,
 ) -> tuple[pa.Table, Metadata]:
     """Read a Stata ``.dta`` file."""
@@ -131,10 +131,10 @@ def read_dta(
         where,
         "dta",
         columns,
-        scan_and_narrow_types,
         row_limit,
         row_offset,
         encoding,
+        scan_and_narrow_types,
         preserve_user_missing,
     )
 
@@ -182,10 +182,10 @@ def _read_data(
     where: PathLike | t.IO[bytes],
     file_format: FileFormat,
     columns: Iterable[str] | None,
-    scan_and_narrow_types: bool,
     row_limit: int,
     row_offset: int,
     encoding: str | None,
+    scan_and_narrow_types: bool,
     preserve_user_missing: bool,
 ) -> tuple[pa.Table, Metadata]:
     path, file = _source(where)
