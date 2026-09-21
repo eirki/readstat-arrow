@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "readstat-arrow"
-version = "2026.9.21.0"
+version = "2026.9.21.1"
 description = "Read and write SPSS (.sav) and Stata (.dta) files as Apache Arrow tables via ReadStat"
 readme = "README.md"
 license = "MIT"
@@ -136,7 +136,7 @@ version_pattern = "YYYY.MM.DD.INC0"
 commit = true
 tag = true
 push = true
-current_version = "2026.9.21.0"
+current_version = "2026.9.21.1"
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['version = "{version}"']
