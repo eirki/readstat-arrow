@@ -85,15 +85,12 @@ jobs:
           name: dist-${{ matrix.label }}
           path: wheelhouse/*.whl
 
-  # Dry run: exercises the whole OIDC handshake and the upload itself without
-  # burning a version number on real PyPI.  Run it from the Actions tab with the
-  # publish-testpypi box ticked.
-  publish-testpypi:
-    name: Publish to TestPyPI
+  publish:
+    name: Publish to PyPI
     if: github.event_name == 'release'
     needs: [sdist, wheels]
     runs-on: ubuntu-24.04
-    environment: testpypi
+    environment: pypi
     permissions:
       id-token: write
     steps:
@@ -104,28 +101,3 @@ jobs:
           path: dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          # TestPyPI rejects a version it already holds, and the date-based
-          # version only changes on a bumpver run -- so let repeat dry runs be
-          # no-ops instead of failures.
-          skip-existing: true
-
-  # publish:
-  #   name: Publish to PyPI
-  #   if: github.event_name == 'release'
-  #   needs: [sdist, wheels]
-  #   runs-on: ubuntu-24.04
-  #   environment: pypi
-  #   permissions:
-  #     # Trusted Publishing: PyPI mints a short-lived token from this OIDC
-  #     # identity, so the repository holds no API token at all.
-  #     id-token: write
-  #   steps:
-  #     - uses: actions/download-artifact@v8
-  #       with:
-  #         pattern: dist-*
-  #         merge-multiple: true
-  #         path: dist
-
-  #     - uses: pypa/gh-action-pypi-publish@release/v1
