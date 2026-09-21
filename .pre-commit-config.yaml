@@ -1,0 +1,34 @@
+# Install once with: uv run pre-commit install
+# Run over everything with: uv run pre-commit run --all-files
+default_install_hook_types: [pre-commit]
+exclude: ^vendor/
+
+repos:
+  # Everything below runs the tools from uv.lock through `uv run`, so the hooks
+  # and CI are always the same versions -- no mirror `rev:` to keep in sync.
+  # Requires uv on PATH, which the project requires anyway.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # mypy also needs the project env (pyarrow stubs, the compiled package).
+      # files/exclude live in pyproject.toml, hence pass_filenames: false.
+      - id: mypy
+        name: mypy
+        entry: uv run --frozen mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true

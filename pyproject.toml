@@ -38,6 +38,7 @@ dev = [
   "mypy>=1.11",
   "coverage>=7.16.1",
   "bumpver>=2026.1132",
+  "pre-commit>=4",
 ]
 
 [tool.setuptools]

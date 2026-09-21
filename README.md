@@ -184,6 +184,7 @@ cd readstat-arrow
 uv sync            # builds the Cython extension into .venv
 uv run coverage run -m pytest && uv run coverage report || uv run  coverage html
 uv run ruff check . && uv run ruff format --check . && uv run mypy
+uv run pre-commit install    # optional: run those same checks on every commit
 ```
 
 `uv run mypy` checks `src/` and `tests/` in strict mode. The Cython sources in
