@@ -116,10 +116,9 @@ class _Writer:
             _warn_renames(self.renamed_variables, self._file_format)
         self.metadata = metadata
 
-        family = _dates.FAMILY_OF_FORMAT[self._file_format]
         ranges = variable_ranges or {}
         self._plans = [
-            _ColumnPlan.build(field, metadata, family, self._file_format, ranges.get(original))
+            _ColumnPlan.build(field, metadata, self._file_format, ranges.get(original))
             for original, field in zip(schema.names, written, strict=True)
         ]
         label_sets, self._label_set_names = _plan_label_sets(self._plans, self._file_format)
@@ -337,7 +336,6 @@ class _ColumnPlan:
         name: str,
         kind: int,
         metadata: Metadata,
-        family: _dates.Family,
         temporal: _dates.TemporalKind | None,
         storage_width: int,
         fmt: str | None,
@@ -347,7 +345,6 @@ class _ColumnPlan:
         self.name = name
         self.kind = kind
         self.metadata = metadata
-        self.family = family
         self.temporal = temporal
         self.storage_width = storage_width
         self.format = fmt
@@ -359,7 +356,6 @@ class _ColumnPlan:
         cls,
         field: pa.Field,
         metadata: Metadata,
-        family: _dates.Family,
         file_format: FileFormat,
         value_range: tuple[int, int] | None = None,
     ) -> _ColumnPlan:
@@ -375,15 +371,15 @@ class _ColumnPlan:
 
         temporal = _dates.kind_of_type(typ)
         fmt = metadata.formats.get(name)
-        if fmt and (family == "stata") != fmt.startswith("%"):
+        if fmt and (file_format == "dta") != fmt.startswith("%"):
             fmt = None  # a format from the other family (e.g. SPSS "F8.2" into Stata); let ReadStat default
         if temporal is not None:
             fmt = (
                 fmt
-                if fmt and _dates.classify(family, fmt) == temporal
-                else _dates.DEFAULT_FORMAT[family][temporal]
+                if fmt and _dates.classify(file_format, fmt) == temporal
+                else _dates.DEFAULT_FORMAT[file_format][temporal]
             )
-            kind = _K_INT32 if (family == "stata" and temporal == "date") else _K_DOUBLE
+            kind = _K_INT32 if (file_format == "dta" and temporal == "date") else _K_DOUBLE
         elif pa.types.is_string(typ) or pa.types.is_large_string(typ):
             kind = _K_STRING
         elif (
@@ -423,7 +419,7 @@ class _ColumnPlan:
         if kind == _K_STRING and tagged:
             raise ValueError(f"column {field.name!r}: only numeric variables can have tagged missing values")
 
-        return cls(name, kind, metadata, family, temporal, storage_width, fmt, file_format, tagged)
+        return cls(name, kind, metadata, temporal, storage_width, fmt, file_format, tagged)
 
     def prepare(self, array: pa.Array) -> tuple[pa.Array, pa.Array | None]:
         """Convert ``array`` to the exact Arrow type the compiled writer reads for this kind.
@@ -436,7 +432,7 @@ class _ColumnPlan:
             tags = _tag_codes(array, self.name)
             array = _struct_values(array)
         if self.temporal is not None:
-            array = _dates.to_raw(array, self.family, self.temporal)
+            array = _dates.to_raw(array, self.file_format, self.temporal)
         target = _KIND_TYPE[self.kind]
         if not array.type.equals(target):
             array = pc.cast(array, target)

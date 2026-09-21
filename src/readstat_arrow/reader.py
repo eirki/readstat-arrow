@@ -355,24 +355,22 @@ def _emit_warnings(messages: list[str]) -> None:
 
 def _convert_date_types(schema: pa.Schema, metadata: Metadata, file_format: FileFormat) -> pa.Schema:
     """Retype the fields :func:`_convert_dates` would convert, without touching any data."""
-    family = _dates.FAMILY_OF_FORMAT[file_format]
     for i, field_ in enumerate(schema):
         if not pa.types.is_floating(field_.type) and not pa.types.is_integer(field_.type):
             continue
-        kind = _dates.classify(family, metadata.formats.get(field_.name))
+        kind = _dates.classify(file_format, metadata.formats.get(field_.name))
         if kind is not None:
             schema = schema.set(i, field_.with_type(_dates.TYPE_OF_KIND[kind]))
     return schema
 
 
 def _convert_dates(table: pa.Table, metadata: Metadata, file_format: FileFormat) -> pa.Table:
-    family = _dates.FAMILY_OF_FORMAT[file_format]
     for i, name in enumerate(table.column_names):
         if not pa.types.is_floating(table.column(i).type) and not pa.types.is_integer(table.column(i).type):
             continue
-        kind = _dates.classify(family, metadata.formats.get(name))
+        kind = _dates.classify(file_format, metadata.formats.get(name))
         if kind is not None:
-            table = table.set_column(i, name, _dates.convert(table.column(i), family, kind))
+            table = table.set_column(i, name, _dates.convert(table.column(i), file_format, kind))
     return table
 
 

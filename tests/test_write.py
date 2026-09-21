@@ -473,11 +473,19 @@ def test_temporal_type_variants(fmt: FileFormat) -> None:
     out.seek(0)
     back, _ = read(out)
 
-    assert back.schema.types == [pa.timestamp("us"), pa.date32(), pa.duration("us")]
+    # Stata has nothing that denotes elapsed time, so a duration goes out as a plain number of
+    # milliseconds -- the unit %tc counts in -- rather than as some instant in 1960.
+    # SPSS has DTIME, which round-trips.
+    if fmt == "dta":
+        dur_type, dur_values = pa.float64(), [90_000_000.0, None]  # 25 hours in milliseconds
+    else:
+        dur_type, dur_values = pa.duration("us"), [timedelta(days=1, hours=1), None]
+
+    assert back.schema.types == [pa.timestamp("us"), pa.date32(), dur_type]
     assert back.to_pydict() == {
         "ts_tz": [datetime(2020, 9, 13, 12, 26, 40), None],  # the UTC instant; neither has a timezone
         "d64": [date(1970, 1, 1), date(1970, 1, 2)],
-        "dur": [timedelta(days=1, hours=1), None],
+        "dur": dur_values,
     }
 
 
