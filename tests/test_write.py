@@ -476,6 +476,8 @@ def test_temporal_type_variants(fmt: FileFormat) -> None:
     # Stata has nothing that denotes elapsed time, so a duration goes out as a plain number of
     # milliseconds -- the unit %tc counts in -- rather than as some instant in 1960.
     # SPSS has DTIME, which round-trips.
+    dur_type: pa.DataType
+    dur_values: list[float | timedelta | None]
     if fmt == "dta":
         dur_type, dur_values = pa.float64(), [90_000_000.0, None]  # 25 hours in milliseconds
     else:
