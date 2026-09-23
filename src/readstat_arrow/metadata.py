@@ -85,7 +85,7 @@ class Metadata:
     """Everything a file records besides the data itself.
 
     Every per-variable field is a mapping from a variable name to one attribute,
-    so reading a label is ``meta.variable_labels["q1"]`` and setting one is an
+    so reading a label is ``metadata.variable_labels["q1"]`` and setting one is an
     ordinary dictionary assignment. A name that is absent, or mapped to ``None``,
     declares nothing, and the writers then fall back to the format's own default -
     so ``Metadata()`` is a valid "nothing declared" starting point, and a mapping

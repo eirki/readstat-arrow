@@ -41,21 +41,21 @@ YES_NO: dict[FileFormat, list[Code]] = {
 
 def test_mappings_hold_only_what_the_file_declares(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    schema, _num_rows, meta = read_metadata(SAMPLES[fmt])
+    schema, _num_rows, metadata = read_metadata(SAMPLES[fmt])
 
     assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
-    assert meta.variable_labels["mychar"] == "character"
-    assert meta.value_labels == SAMPLE_VALUE_LABELS[fmt]
-    assert "mychar" not in meta.value_labels  # ... and an undeclared name is simply absent
+    assert metadata.variable_labels["mychar"] == "character"
+    assert metadata.value_labels == SAMPLE_VALUE_LABELS[fmt]
+    assert "mychar" not in metadata.value_labels  # ... and an undeclared name is simply absent
 
 
 def test_describing_a_variable_is_ordinary_dictionary_work() -> None:
-    meta = Metadata()
-    meta.variable_labels["agree"] = "Agrees with statement"
-    meta.value_labels["agree"] = [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]
+    metadata = Metadata()
+    metadata.variable_labels["agree"] = "Agrees with statement"
+    metadata.value_labels["agree"] = [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]
 
-    assert meta.variable_labels == {"agree": "Agrees with statement"}
-    assert meta.value_labels == {"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]}
+    assert metadata.variable_labels == {"agree": "Agrees with statement"}
+    assert metadata.value_labels == {"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]}
 
 
 def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
@@ -63,10 +63,10 @@ def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     codes: list[Code] = [{"value": 1, "label": "Yes"}, {"value": 2, "label": "No"}]
-    meta = Metadata(value_labels={"q1": codes, "q2": codes})
+    metadata = Metadata(value_labels={"q1": codes, "q2": codes})
     table = pa.table({"q1": pa.array([1], pa.int8()), "q2": pa.array([2], pa.int8())})
     shared = io.BytesIO()
-    write(shared, table, meta)  # identical lists -> one label set
+    write(shared, table, metadata)  # identical lists -> one label set
 
     shared.seek(0)
     _schema, _num_rows, back = read_metadata(shared)
@@ -78,31 +78,31 @@ def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
 
 def test_rename_variable(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    _schema, _num_rows, meta = read_metadata(SAMPLES[fmt])
+    _schema, _num_rows, metadata = read_metadata(SAMPLES[fmt])
 
-    renamed = meta.rename_variable("mylabl", "sex")
+    renamed = metadata.rename_variable("mylabl", "sex")
 
-    assert renamed.value_labels["sex"] == meta.value_labels["mylabl"]
-    assert renamed.variable_labels["sex"] == meta.variable_labels["mylabl"]
+    assert renamed.value_labels["sex"] == metadata.value_labels["mylabl"]
+    assert renamed.variable_labels["sex"] == metadata.variable_labels["mylabl"]
     assert "mylabl" not in renamed.value_labels  # gone from every mapping ...
     assert "mylabl" not in renamed.formats
-    assert "mylabl" in meta.value_labels  # ... and the original is untouched
+    assert "mylabl" in metadata.value_labels  # ... and the original is untouched
     # The entry keeps its place, so the repr still reads in file order.
     assert list(renamed.formats) == ["mychar", "mynum", "mydate", "dtime", "sex", "myord", "mytime"]
 
     with pytest.raises(ValueError, match="'myord' already declares something"):
-        meta.rename_variable("mylabl", "myord")
+        metadata.rename_variable("mylabl", "myord")
 
 
 def test_repr_cuts_long_mappings_short() -> None:
     """A file's worth of variables has to stay readable at a prompt."""
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={f"v{i}": f"Variable {i}" for i in range(5)},
         missing_values={"v0": {"values": [9.0]}},
         file_label="Big",
     )
 
-    assert repr(meta) == dedent("""\
+    assert repr(metadata) == dedent("""\
         Metadata(
             variable_labels={'v0': 'Variable 0', 'v1': 'Variable 1', 'v2': 'Variable 2', ... +2 more},
             value_labels={},
@@ -118,10 +118,10 @@ def test_repr_cuts_long_mappings_short() -> None:
         )""")
 
 
-def _rename_all(meta: Metadata, names: list[str], *, suffix: str) -> Metadata:
+def _rename_all(metadata: Metadata, names: list[str], *, suffix: str) -> Metadata:
     for name in names:
-        meta = meta.rename_variable(name, name + suffix)
-    return meta
+        metadata = metadata.rename_variable(name, name + suffix)
+    return metadata
 
 
 # Tests of one format alone: a file, a record or a rule the other format has no equivalent of.
@@ -145,13 +145,13 @@ def test_sav_merge() -> None:
 
 
 def test_sav_merge_prefers_self_on_overlap() -> None:
-    schema, _num_rows, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    schema, _num_rows, metadata = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
     labels: dict[str, str | None] = {name: "other" for name in schema.names}
     labels["extra"] = "Extra"
-    other = replace(meta, variable_labels=labels)
+    other = replace(metadata, variable_labels=labels)
 
-    merged = meta.merge(other)
+    merged = metadata.merge(other)
 
     assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
     assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
-    assert meta.merge(meta) == replace(meta, notes=[*meta.notes, *meta.notes])
+    assert metadata.merge(metadata) == replace(metadata, notes=[*metadata.notes, *metadata.notes])

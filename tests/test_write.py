@@ -54,7 +54,7 @@ def _survey() -> tuple[pa.Table, Metadata]:
             ),
         }
     )
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={
             "mychar": "Character",
             "mynum": "Numeric",
@@ -76,7 +76,7 @@ def _survey() -> tuple[pa.Table, Metadata]:
         file_label="Tiny survey",
         notes=["written by the test suite"],
     )
-    return table, meta
+    return table, metadata
 
 
 def _panel() -> tuple[pa.Table, Metadata]:
@@ -96,7 +96,7 @@ def _panel() -> tuple[pa.Table, Metadata]:
             ),
         }
     )
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={
             "id": "Respondent",
             "wave": "Wave",
@@ -112,30 +112,30 @@ def _panel() -> tuple[pa.Table, Metadata]:
         formats={"day": "%td", "when": "%tc"},
         file_label="Panel",
     )
-    return table, meta
+    return table, metadata
 
 
 def test_write_and_read_a_path(fmt: FileFormat, tmp_path: Path) -> None:
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
     out = tmp_path / f"out.{fmt}"
 
-    write(out, table, meta)
-    back, back_meta = read(out)
+    write(out, table, metadata)
+    back, back_metadata = read(out)
 
     assert out.exists()
     assert back.equals(table)
-    assert back_meta.file_label == "Tiny survey"
+    assert back_metadata.file_label == "Tiny survey"
 
 
 def test_writer_in_batches(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
     out = io.BytesIO()
 
-    with Writer(out, table.schema, table.num_rows, meta) as writer:
+    with Writer(out, table.schema, table.num_rows, metadata) as writer:
         writer.write_table(table.slice(0, 2))
         writer.write_batch(table.slice(2).to_batches()[0])
         assert writer.rows_written == 5
@@ -147,10 +147,10 @@ def test_writer_in_batches(fmt: FileFormat) -> None:
 
 def test_writer_leaves_the_callers_file_object_open(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _panel()
+    table, metadata = _panel()
     out = io.BytesIO()
 
-    with Writer(out, table.schema, table.num_rows, meta) as writer:
+    with Writer(out, table.schema, table.num_rows, metadata) as writer:
         writer.write_table(table)
 
     assert not out.closed  # caller's file object is left open
@@ -160,9 +160,9 @@ def test_writer_leaves_the_callers_file_object_open(fmt: FileFormat) -> None:
 
 def test_writer_rejects_wrong_schema(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
 
-    with Writer(io.BytesIO(), table.schema, table.num_rows, meta) as writer:
+    with Writer(io.BytesIO(), table.schema, table.num_rows, metadata) as writer:
         with pytest.raises(ValueError, match="schema"):
             writer.write_table(table.select(["mychar"]))
         writer.write_table(table)
@@ -170,13 +170,13 @@ def test_writer_rejects_wrong_schema(fmt: FileFormat) -> None:
 
 def test_writer_enforces_num_rows(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
 
-    writer = Writer(io.BytesIO(), table.schema, 3, meta)
+    writer = Writer(io.BytesIO(), table.schema, 3, metadata)
     with pytest.raises(readstat_arrow.ReadstatError, match="3 rows"):
         writer.write_table(table)
 
-    writer = Writer(io.BytesIO(), table.schema, 10, meta)
+    writer = Writer(io.BytesIO(), table.schema, 10, metadata)
     writer.write_table(table)
     with pytest.raises(readstat_arrow.ReadstatError):
         writer.close()
@@ -184,7 +184,7 @@ def test_writer_enforces_num_rows(fmt: FileFormat) -> None:
 
 def test_writer_rejects_a_negative_num_rows(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
-    table, _meta = _survey()
+    table, _metadata = _survey()
     with pytest.raises(ValueError, match="num_rows must be non-negative"):
         Writer(io.BytesIO(), table.schema, -1)
 
@@ -193,16 +193,16 @@ def test_close_is_idempotent(fmt: FileFormat) -> None:
     """Closing twice is not an error; the second call has nothing left to finish."""
     read = READER_FUNCS[fmt]
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
     out = io.BytesIO()
 
-    writer = Writer(out, table.schema, table.num_rows, meta)
+    writer = Writer(out, table.schema, table.num_rows, metadata)
     writer.write_table(table)
     writer.close()
     writer.close()
 
     out.seek(0)
-    back, _back_meta = read(out)
+    back, _back_metadata = read(out)
     assert back.equals(table)
 
 
@@ -210,12 +210,12 @@ def test_a_failed_write_leaves_no_finished_file(fmt: FileFormat, tmp_path: Path)
     """Leaving the block with an exception closes the file without ending the format properly."""
     read = READER_FUNCS[fmt]
     Writer = WRITER_CLASSES[fmt]
-    table, meta = _survey()
+    table, metadata = _survey()
     out = tmp_path / f"partial.{fmt}"
 
     with (
         pytest.raises(RuntimeError, match="boom"),
-        Writer(out, table.schema, table.num_rows, meta) as writer,
+        Writer(out, table.schema, table.num_rows, metadata) as writer,
     ):
         writer.write_table(table.slice(0, 2))
         raise RuntimeError("boom")
@@ -230,21 +230,21 @@ def test_columns_without_metadata_are_written_undeclared(fmt: FileFormat) -> Non
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     table = pa.table({"num": pa.array([1.0, 2.0]), "text": pa.array(["x", "yy"])})
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"num": "Numbers", "gone": "Not here"},
         file_label="Partly described",
     )
     out = io.BytesIO()
 
-    write(out, table, meta)
+    write(out, table, metadata)
     out.seek(0)
-    back, back_meta = read(out)
+    back, back_metadata = read(out)
 
     assert back.to_pydict() == {"num": [1.0, 2.0], "text": ["x", "yy"]}
     assert back.column_names == ["num", "text"]
-    assert back_meta.variable_labels == {"num": "Numbers"}  # "gone" ignored, "text" declared nothing
-    assert back_meta.value_labels == {}
-    assert back_meta.file_label == "Partly described"
+    assert back_metadata.variable_labels == {"num": "Numbers"}  # "gone" ignored, "text" declared nothing
+    assert back_metadata.value_labels == {}
+    assert back_metadata.file_label == "Partly described"
 
 
 def test_none_declares_nothing(fmt: FileFormat) -> None:
@@ -252,7 +252,7 @@ def test_none_declares_nothing(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     table = pa.table({"n": pa.array([1.0]), "s": pa.array(["ab"], pa.large_string())})
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"n": None, "s": "Text"},
         value_labels={"n": None},
         formats={"n": None},
@@ -262,20 +262,20 @@ def test_none_declares_nothing(fmt: FileFormat) -> None:
         missing_values={"n": None},
     )
     nones = io.BytesIO()
-    write(nones, table, meta)
+    write(nones, table, metadata)
     nones.seek(0)
-    bare, bare_meta = read(nones)
+    bare, bare_metadata = read(nones)
 
     empty = io.BytesIO()
     write(empty, table, Metadata(variable_labels={"s": "Text"}))
     empty.seek(0)
-    same, same_meta = read(empty)
+    same, same_metadata = read(empty)
 
     assert bare.equals(same)
-    assert bare_meta == same_meta
-    assert bare_meta.variable_labels == {"s": "Text"}
-    assert bare_meta.value_labels == {}
-    assert bare_meta.storage_widths["s"] == 2  # sized from the data, as with no entry at all
+    assert bare_metadata == same_metadata
+    assert bare_metadata.variable_labels == {"s": "Text"}
+    assert bare_metadata.value_labels == {}
+    assert bare_metadata.storage_widths["s"] == 2  # sized from the data, as with no entry at all
 
 
 UNDECLARED: dict[FileFormat, dict[str, list[t.Any]]] = {
@@ -296,11 +296,11 @@ def test_write_without_metadata(fmt: FileFormat) -> None:
     assert omitted.getvalue() == spelled_out.getvalue()
 
     omitted.seek(0)
-    back, back_meta = read(omitted)
+    back, back_metadata = read(omitted)
     assert back.to_pydict() == UNDECLARED[fmt]
     assert back.column_names == ["n", "s"]
-    assert back_meta.variable_labels == {}
-    assert back_meta.file_label is None
+    assert back_metadata.variable_labels == {}
+    assert back_metadata.file_label is None
 
 
 def test_string_widths_survive_repeated_round_trips(fmt: FileFormat) -> None:
@@ -319,10 +319,10 @@ def test_string_widths_survive_repeated_round_trips(fmt: FileFormat) -> None:
     widths = []
     for _ in range(3):  # then keep rewriting with nothing but what was read back
         out.seek(0)
-        data, meta = read(out)
-        widths.append([meta.storage_widths[n] for n in data.column_names])
+        data, metadata = read(out)
+        widths.append([metadata.storage_widths[n] for n in data.column_names])
         out = io.BytesIO()
-        with Writer(out, data.schema, data.num_rows, meta) as writer:
+        with Writer(out, data.schema, data.num_rows, metadata) as writer:
             writer.write_table(data)
 
     assert widths == [[3, 20]] * 3, f"widths drifted: {widths}"
@@ -338,7 +338,7 @@ def test_incremental_writer_without_metadata(fmt: FileFormat) -> None:
         writer.write_table(table)
 
     out.seek(0)
-    back, _meta = read(out)
+    back, _metadata = read(out)
     assert back.to_pydict() == {"n": [1.0, 2.0]}
     assert back.column_names == ["n"]
 
@@ -421,8 +421,8 @@ def test_an_empty_code_list_writes_no_label_set(fmt: FileFormat) -> None:
     empty.seek(0)
     with warnings.catch_warnings():
         warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-        _back, back_meta = read(empty)
-    assert back_meta.value_labels == {}
+        _back, back_metadata = read(empty)
+    assert back_metadata.value_labels == {}
 
 
 def test_rename_invalid_names_says_nothing_when_nothing_is_renamed(fmt: FileFormat) -> None:
@@ -439,7 +439,7 @@ def test_rename_invalid_names_says_nothing_when_nothing_is_renamed(fmt: FileForm
 
     assert writer.renamed_variables == {}
     out.seek(0)
-    back, _meta = read(out)
+    back, _metadata = read(out)
     assert back.column_names == ["ok", "also_ok"]
 
 
@@ -514,7 +514,7 @@ def test_long_labels_are_truncated_on_character_boundaries(fmt: FileFormat) -> N
     long_file_label = "日本語" * 40  # 360 bytes
     codes: list[Code] = [{"value": 1, "label": long_value_label}]
     table = pa.table({"v": pa.array([1], pa.int8())})
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"v": long_variable_label},
         value_labels={"v": codes},
         file_label=long_file_label,
@@ -522,7 +522,7 @@ def test_long_labels_are_truncated_on_character_boundaries(fmt: FileFormat) -> N
     out = io.BytesIO()
 
     with pytest.warns(readstat_arrow.ReadstatWarning, match="truncated"):
-        write(out, table, meta)
+        write(out, table, metadata)
     out.seek(0)
     _, back = read(out)
 
@@ -555,7 +555,7 @@ def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     codes: list[Code] = [{"value": 1, "label": "€" * 40}]  # exactly 120 bytes
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"v": "ø" * 128},  # exactly 256 bytes
         value_labels={"v": codes},
         file_label="x" * 64,
@@ -565,7 +565,7 @@ def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
-        write(out, table, meta)
+        write(out, table, metadata)
     out.seek(0)
     _, back = read(out)
 
@@ -579,53 +579,53 @@ def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
 
 
 def test_write_sav_roundtrip() -> None:
-    table, meta = _survey()
+    table, metadata = _survey()
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out)
+    back, back_metadata = readstat_arrow.read_sav(out)
 
     assert back.equals(table)
-    assert back_meta.file_label == "Tiny survey"
-    assert back_meta.notes == meta.notes
+    assert back_metadata.file_label == "Tiny survey"
+    assert back_metadata.notes == metadata.notes
     assert back.column_names == table.column_names
-    assert back_meta.variable_labels == meta.variable_labels
-    assert back_meta.formats == meta.formats
-    assert back_meta.measures == meta.measures
-    assert back_meta.value_labels == meta.value_labels
+    assert back_metadata.variable_labels == metadata.variable_labels
+    assert back_metadata.formats == metadata.formats
+    assert back_metadata.measures == metadata.measures
+    assert back_metadata.value_labels == metadata.value_labels
 
 
 def test_write_dta_roundtrip() -> None:
-    table, meta = _panel()
+    table, metadata = _panel()
     out = io.BytesIO()
 
-    readstat_arrow.write_dta(out, table, meta)
+    readstat_arrow.write_dta(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_dta(out)
+    back, back_metadata = readstat_arrow.read_dta(out)
 
     assert back.equals(table)  # int8/int16/int32/float32 stay put, dates/times survive
-    assert back_meta.file_label == "Panel"
-    assert back_meta.variable_labels == meta.variable_labels
-    assert back_meta.value_labels == {"sex": [{"value": 1, "label": "M"}, {"value": 2, "label": "F"}]}
-    assert back_meta.formats["day"] == "%td"
-    assert back_meta.formats["when"] == "%tc"
+    assert back_metadata.file_label == "Panel"
+    assert back_metadata.variable_labels == metadata.variable_labels
+    assert back_metadata.value_labels == {"sex": [{"value": 1, "label": "M"}, {"value": 2, "label": "F"}]}
+    assert back_metadata.formats["day"] == "%td"
+    assert back_metadata.formats["when"] == "%tc"
 
 
 def test_sav_metadata_into_dta_drops_spss_formats() -> None:
-    table, meta = _survey()  # metadata full of SPSS formats: F8.2, DATE11, TIME8, ...
+    table, metadata = _survey()  # metadata full of SPSS formats: F8.2, DATE11, TIME8, ...
     out = io.BytesIO()
 
-    readstat_arrow.write_dta(out, table, meta)
+    readstat_arrow.write_dta(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_dta(out)
+    back, back_metadata = readstat_arrow.read_dta(out)
 
     assert back.equals(table)
-    mynum_format = back_meta.formats.get("mynum")
+    mynum_format = back_metadata.formats.get("mynum")
     assert mynum_format is not None  # the reader records a format for every variable
     assert mynum_format.startswith("%")  # ... and it is a Stata one, not the SPSS "F8.2"
-    assert back_meta.formats["mydate"] == "%td"
-    assert back_meta.formats["mytime"] == "%tcHH:MM:SS"
+    assert back_metadata.formats["mydate"] == "%td"
+    assert back_metadata.formats["mytime"] == "%tcHH:MM:SS"
 
 
 def test_sav_preserve_user_missing_values_roundtrip() -> None:
@@ -636,7 +636,7 @@ def test_sav_preserve_user_missing_values_roundtrip() -> None:
             "myord": pa.array([1.0, -1.0, -2.0, -3.0]),
         }
     )
-    meta = Metadata(
+    metadata = Metadata(
         missing_values={
             "mynum": {"lo": 2000.0, "hi": 3000.0, "value": -1.0},
             "myord": {"values": [-1.0, -2.0, -3.0]},
@@ -644,15 +644,15 @@ def test_sav_preserve_user_missing_values_roundtrip() -> None:
     )
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out, preserve_user_missing=True)
+    back, back_metadata = readstat_arrow.read_sav(out, preserve_user_missing=True)
     out.seek(0)
     nulled, _ = readstat_arrow.read_sav(out)
 
     assert back.equals(table)
     assert nulled.to_pydict() == {"mynum": [1.0, None, None, None], "myord": [1.0, None, None, None]}
-    assert back_meta.missing_values == {
+    assert back_metadata.missing_values == {
         "mynum": {"lo": 2000.0, "hi": 3000.0, "value": -1.0},
         "myord": {"values": [-1.0, -2.0, -3.0]},
     }
@@ -660,7 +660,7 @@ def test_sav_preserve_user_missing_values_roundtrip() -> None:
 
 def test_sav_write_from_scratch() -> None:
     """Building metadata by hand, without reading a file first."""
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"id": "Respondent id", "agree": "Agrees with statement"},
         value_labels={"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]},
         measures={"id": "nominal", "agree": "nominal"},
@@ -669,14 +669,14 @@ def test_sav_write_from_scratch() -> None:
     table = pa.table({"id": pa.array([1, 2, 3], pa.int64()), "agree": pa.array([1, None, 0], pa.int8())})
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out)
+    back, back_metadata = readstat_arrow.read_sav(out)
 
     assert back.to_pydict() == {"id": [1.0, 2.0, 3.0], "agree": [1.0, None, 0.0]}  # SPSS is all doubles
-    assert back_meta.file_label == "Tiny survey"
-    assert back_meta.variable_labels["agree"] == "Agrees with statement"
-    assert back_meta.value_labels["agree"] == [
+    assert back_metadata.file_label == "Tiny survey"
+    assert back_metadata.variable_labels["agree"] == "Agrees with statement"
+    assert back_metadata.value_labels["agree"] == [
         {"value": 0.0, "label": "No"},
         {"value": 1.0, "label": "Yes"},
     ]  # SPSS: doubles
@@ -691,8 +691,8 @@ def test_sav_empty_missing_values_list_declares_nothing() -> None:
         out = io.BytesIO()
         readstat_arrow.write_sav(out, table, Metadata(missing_values={"q": missing}))
         out.seek(0)
-        _back, back_meta = readstat_arrow.read_sav(out)
-        assert back_meta.missing_values == {}
+        _back, back_metadata = readstat_arrow.read_sav(out)
+        assert back_metadata.missing_values == {}
 
 
 def test_sav_too_many_discrete_missing_raises() -> None:
@@ -721,17 +721,17 @@ def test_dta_cannot_store_user_defined_missing_values() -> None:
     declared: list[Missingness] = [{"values": [9.0]}, {"lo": 8.0, "hi": 9.0}]
 
     for missing in declared:
-        meta = Metadata(missing_values={"q": missing})
+        metadata = Metadata(missing_values={"q": missing})
         with pytest.raises(ValueError, match=r"'q'.*cannot store SPSS user-defined missing values"):
-            readstat_arrow.write_dta(io.BytesIO(), table, meta)
+            readstat_arrow.write_dta(io.BytesIO(), table, metadata)
 
 
 def test_sav_missing_values_of_a_string_variable_must_be_strings() -> None:
     table = pa.table({"s": pa.array(["a"], pa.large_string())})
-    meta = Metadata(missing_values={"s": {"values": ["Z", 9.0]}})
+    metadata = Metadata(missing_values={"s": {"values": ["Z", 9.0]}})
 
     with pytest.raises(ValueError, match=r"'s'.*must be strings"):
-        readstat_arrow.write_sav(io.BytesIO(), table, meta)
+        readstat_arrow.write_sav(io.BytesIO(), table, metadata)
 
 
 def test_write_dta_widens_integers_in_reserved_ranges() -> None:
@@ -794,7 +794,7 @@ def test_dta_writer_widens_from_declared_ranges() -> None:
             writer.write_batch(batch)
 
     out.seek(0)
-    back, _meta = readstat_arrow.read_dta(out)
+    back, _metadata = readstat_arrow.read_dta(out)
     assert back.schema.types == [pa.int16(), pa.float64(), pa.int16(), pa.float64()]
     assert back.column("b").to_pylist() == [1, 101]
     assert back.column("tagged").to_pylist() == [1, 101]
@@ -823,15 +823,15 @@ def test_dta_labelled_tags() -> None:
         {"value": "a", "label": "Refused"},
     ]
     table = pa.table({"q": _tagged([1, 2, None], [None, None, "a"])})
-    meta = Metadata(value_labels={"q": codes})
+    metadata = Metadata(value_labels={"q": codes})
     out = io.BytesIO()
 
-    readstat_arrow.write_dta(out, table, meta)
+    readstat_arrow.write_dta(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_dta(out, preserve_user_missing=True)
+    back, back_metadata = readstat_arrow.read_dta(out, preserve_user_missing=True)
 
     assert back.equals(table)
-    assert back_meta.value_labels["q"] == codes
+    assert back_metadata.value_labels["q"] == codes
 
 
 def test_sav_string_value_labels_roundtrip() -> None:
@@ -842,10 +842,10 @@ def test_sav_string_value_labels_roundtrip() -> None:
 
     readstat_arrow.write_sav(out, table, Metadata(value_labels={"s": codes}))
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out)
+    back, back_metadata = readstat_arrow.read_sav(out)
 
     assert back.equals(table)
-    assert back_meta.value_labels == {"s": codes}
+    assert back_metadata.value_labels == {"s": codes}
 
 
 def test_sav_code_list_cannot_mix_strings_and_numbers() -> None:
@@ -879,8 +879,8 @@ def test_dta_value_label_keys_stop_where_a_long_does() -> None:
     fits = Metadata(value_labels={"v": [{"value": 2_147_483_620, "label": "the largest long"}]})
     readstat_arrow.write_dta(out, table, fits)
     out.seek(0)
-    _back, back_meta = readstat_arrow.read_dta(out)
-    assert back_meta.value_labels == {"v": [{"value": 2_147_483_620, "label": "the largest long"}]}
+    _back, back_metadata = readstat_arrow.read_dta(out)
+    assert back_metadata.value_labels == {"v": [{"value": 2_147_483_620, "label": "the largest long"}]}
 
     for key in (4_294_967_240, 2_147_483_622, -2_147_483_648):  # past int32, .a, past long
         bad = Metadata(value_labels={"v": [{"value": key, "label": "nope"}]})
@@ -942,14 +942,14 @@ def test_sav_integer_columns_default_to_no_decimals() -> None:
             "wide": pa.array([1, 2], pa.int32()),
         }
     )
-    meta = Metadata(formats={"declared": "F5.3"}, display_widths={"wide": 12})
+    metadata = Metadata(formats={"declared": "F5.3"}, display_widths={"wide": 12})
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    _schema, _num_rows, back_meta = readstat_arrow.read_sav_metadata(out)
+    _schema, _num_rows, back_metadata = readstat_arrow.read_sav_metadata(out)
 
-    assert back_meta.formats == {
+    assert back_metadata.formats == {
         "count": "F8.0",  # an integer column: no decimals
         "flag": "F8.0",
         "ratio": "F8.2",  # a float column keeps ReadStat's default
@@ -959,21 +959,21 @@ def test_sav_integer_columns_default_to_no_decimals() -> None:
 
 
 def test_sav_formats_and_display_width_survive() -> None:
-    meta = Metadata(
+    metadata = Metadata(
         formats={"restricted": "N4", "integer": "F1.0", "text": "A3"},
         display_widths={"restricted": 12, "text": 20},
     )
     table = pa.table({"restricted": [1023.0, 10.0], "integer": [1.0, 2.0], "text": ["ab", "c"]})
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out)
+    back, back_metadata = readstat_arrow.read_sav(out)
 
     assert back.equals(table.set_column(2, "text", table.column("text").cast(pa.large_string())))
-    assert back_meta.formats == {"restricted": "N4", "integer": "F1.0", "text": "A3"}
-    assert back_meta.display_widths["restricted"] == 12
-    assert back_meta.display_widths["text"] == 20
+    assert back_metadata.formats == {"restricted": "N4", "integer": "F1.0", "text": "A3"}
+    assert back_metadata.display_widths["restricted"] == 12
+    assert back_metadata.display_widths["text"] == 20
 
 
 def test_sav_string_user_missing_roundtrip() -> None:
@@ -984,17 +984,17 @@ def test_sav_string_user_missing_roundtrip() -> None:
     the encoded bytes have to outlive the call that declares them.
     """
     table = pa.table({"mychar": pa.array(["Z", "a", "æøå", "漢字"], pa.large_string())})
-    meta = Metadata(missing_values={"mychar": {"values": ["Z", "æøå", "漢字"]}})
+    metadata = Metadata(missing_values={"mychar": {"values": ["Z", "æøå", "漢字"]}})
     out = io.BytesIO()
 
-    readstat_arrow.write_sav(out, table, meta)
+    readstat_arrow.write_sav(out, table, metadata)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_sav(out, preserve_user_missing=True)
+    back, back_metadata = readstat_arrow.read_sav(out, preserve_user_missing=True)
     out.seek(0)
     nulled, _ = readstat_arrow.read_sav(out)
 
     assert back.equals(table)
-    assert back_meta.missing_values == {"mychar": {"values": ["Z", "æøå", "漢字"]}}
+    assert back_metadata.missing_values == {"mychar": {"values": ["Z", "æøå", "漢字"]}}
     assert nulled.column("mychar").to_pylist() == [None, "a", None, None]
 
 
@@ -1002,16 +1002,16 @@ def test_dta_rename_invalid_names() -> None:
     """Stata's rules are the strict pair: letters, digits and _, 32 characters, reserved words."""
     names = ["ok", "my var", "1st", "int", "str8", "a.b", "a b", "a_b", "kjønn", "x" * 40]
     table = pa.table({name: pa.array([1.0]) for name in names})
-    meta = Metadata(
+    metadata = Metadata(
         variable_labels={"my var": "has a space"},
         value_labels={"1st": [{"value": 1, "label": "one"}]},
     )
     out = io.BytesIO()
 
     with pytest.warns(readstat_arrow.ReadstatWarning, match="renamed 7 variable"):
-        readstat_arrow.write_dta(out, table, meta, rename_invalid_names=True)
+        readstat_arrow.write_dta(out, table, metadata, rename_invalid_names=True)
     out.seek(0)
-    back, back_meta = readstat_arrow.read_dta(out)
+    back, back_metadata = readstat_arrow.read_dta(out)
 
     assert back.column_names == [
         "ok",  # legal names are untouched, and keep their name even when another sanitises onto it
@@ -1026,8 +1026,8 @@ def test_dta_rename_invalid_names() -> None:
         "x" * 32,  # 32 characters is Stata's limit
     ]
     assert back.num_rows == 1
-    assert back_meta.variable_labels == {"my_var": "has a space"}  # metadata follows its variable
-    assert back_meta.value_labels == {"v1st": [{"value": 1, "label": "one"}]}
+    assert back_metadata.variable_labels == {"my_var": "has a space"}  # metadata follows its variable
+    assert back_metadata.value_labels == {"v1st": [{"value": 1, "label": "one"}]}
 
 
 def test_sav_and_dta_rename_invalid_names_is_off_by_default_and_reported() -> None:
@@ -1049,7 +1049,7 @@ def test_sav_and_dta_rename_invalid_names_is_off_by_default_and_reported() -> No
     writer.close()
 
     out.seek(0)
-    back, _meta = readstat_arrow.read_dta(out)
+    back, _metadata = readstat_arrow.read_dta(out)
     assert back.column_names == ["my_var"]
 
 

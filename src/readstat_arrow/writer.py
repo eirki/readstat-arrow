@@ -484,18 +484,18 @@ class _ColumnPlan:
         return array, tags
 
     def as_spec(self, label_set: str | None) -> dict[str, t.Any]:
-        meta, name = self.metadata, self.name
-        discrete, span = _missing_parts(meta.missing_values.get(name), name)
+        metadata, name = self.metadata, self.name
+        discrete, span = _missing_parts(metadata.missing_values.get(name), name)
         return {
             "name": name,
             "kind": self.kind,
             "storage_width": self.storage_width,
-            "label": _fit(meta.variable_labels.get(name), self.file_format, "variable label", name),
+            "label": _fit(metadata.variable_labels.get(name), self.file_format, "variable label", name),
             "format": self.format,
             "label_set": label_set,
-            "measure": _MEASURE[meta.measures.get(name) or "unknown"],
-            "alignment": _ALIGNMENT[meta.alignments.get(name) or "unknown"],
-            "display_width": meta.display_widths.get(name) or 0,  # 0 lets ReadStat pick a width
+            "measure": _MEASURE[metadata.measures.get(name) or "unknown"],
+            "alignment": _ALIGNMENT[metadata.alignments.get(name) or "unknown"],
+            "display_width": metadata.display_widths.get(name) or 0,  # 0 lets ReadStat pick a width
             "missing_values": [_numeric_or_str(x) for x in discrete],
             "missing_ranges": [] if span is None else [tuple(_numeric_or_str(x) for x in span)],
         }

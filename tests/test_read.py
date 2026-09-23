@@ -66,7 +66,7 @@ MYORD_LABELS: dict[FileFormat, list[Code]] = {
 
 def test_read_sample(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
-    table, meta = read(SAMPLES[fmt])
+    table, metadata = read(SAMPLES[fmt])
 
     expected = pa.table(
         {
@@ -81,31 +81,31 @@ def test_read_sample(fmt: FileFormat) -> None:
     )
     assert table.equals(expected)
     assert table.column_names == expected.column_names
-    assert meta.variable_labels["mychar"] == "character"
-    assert meta.value_labels["mylabl"] == MYLABL_LABELS[fmt]
-    assert meta.value_labels["myord"] == MYORD_LABELS[fmt]
-    assert "mychar" not in meta.value_labels
+    assert metadata.variable_labels["mychar"] == "character"
+    assert metadata.value_labels["mylabl"] == MYLABL_LABELS[fmt]
+    assert metadata.value_labels["myord"] == MYORD_LABELS[fmt]
+    assert "mychar" not in metadata.value_labels
 
     # What only one of the two files has a way of saying.
     if fmt == "sav":
-        assert meta.measures["mychar"] == "nominal"
-        assert meta.storage_widths["mychar"] == 1  # A1: the declared width, not SPSS's 8-byte cell
-        assert meta.notes  # sample.sav carries a document record
-        assert meta.missing_values == {}
+        assert metadata.measures["mychar"] == "nominal"
+        assert metadata.storage_widths["mychar"] == 1  # A1: the declared width, not SPSS's 8-byte cell
+        assert metadata.notes  # sample.sav carries a document record
+        assert metadata.missing_values == {}
     elif fmt == "dta":
-        assert meta.formats["mytime"] == "%tcHH:MM:SS"
-        assert meta.missing_values == {}  # an SPSS-only concept, so empty here whatever the file
+        assert metadata.formats["mytime"] == "%tcHH:MM:SS"
+        assert metadata.missing_values == {}  # an SPSS-only concept, so empty here whatever the file
     else:
         t.assert_never(fmt)
 
 
 def test_column_selection(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
-    table, meta = read(SAMPLES[fmt], columns=["mynum", "mychar"])
+    table, metadata = read(SAMPLES[fmt], columns=["mynum", "mychar"])
     # File order wins over the requested order.
     assert table.equals(pa.table({"mychar": MYCHAR, "mynum": MYNUM}))
     assert table.column_names == ["mychar", "mynum"]  # file order wins in the metadata too
-    assert list(meta.formats) == ["mychar", "mynum"]
+    assert list(metadata.formats) == ["mychar", "mynum"]
 
 
 def test_row_limit_and_offset(fmt: FileFormat) -> None:
@@ -117,7 +117,7 @@ def test_row_limit_and_offset(fmt: FileFormat) -> None:
 
 def test_read_metadata_only(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    schema, num_rows, _meta = read_metadata(SAMPLES[fmt])
+    schema, num_rows, _metadata = read_metadata(SAMPLES[fmt])
     assert num_rows == 5
     assert schema.names == [
         "mychar",
@@ -134,7 +134,7 @@ def test_metadata_schema_matches_a_full_read(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
     read = READER_FUNCS[fmt]
     table, _ = read(SAMPLES[fmt])
-    schema, _num_rows, _meta = read_metadata(SAMPLES[fmt])
+    schema, _num_rows, _metadata = read_metadata(SAMPLES[fmt])
 
     assert schema == table.schema
 
@@ -165,21 +165,21 @@ def test_table_survives_ipc_roundtrip(fmt: FileFormat) -> None:
 
 def test_read_metadata_carries_the_value_labels(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    _schema, num_rows, meta = read_metadata(SAMPLES[fmt])
+    _schema, num_rows, metadata = read_metadata(SAMPLES[fmt])
     assert num_rows == 5
-    assert meta.value_labels["mylabl"] == MYLABL_LABELS[fmt]
+    assert metadata.value_labels["mylabl"] == MYLABL_LABELS[fmt]
 
 
 def test_read_from_file_object(fmt: FileFormat) -> None:
     """A file object gives exactly what the same file at a path gives."""
     read = READER_FUNCS[fmt]
-    expected, expected_meta = read(SAMPLES[fmt])
+    expected, expected_metadata = read(SAMPLES[fmt])
     with SAMPLES[fmt].open("rb") as file:
-        table, meta = read(file)
+        table, metadata = read(file)
         assert not file.closed  # the caller's file object is left open
 
     assert table.equals(expected)
-    assert meta == expected_meta
+    assert metadata == expected_metadata
 
 
 def test_read_from_an_os_encoded_path(fmt: FileFormat) -> None:
@@ -309,12 +309,12 @@ def test_read_from_zip_member(fmt: FileFormat, tmp_path: Path) -> None:
 
 
 def test_sav_preserve_user_missing() -> None:
-    default, meta = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav")
+    default, metadata = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav")
     kept, _ = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav", preserve_user_missing=True)
 
-    assert meta.missing_values["mynum"] == {"lo": 2000.0, "hi": 3000.0, "value": -1.0}
-    assert meta.missing_values["myord"] == {"values": [-1.0, -2.0, -3.0]}
-    assert "mychar" not in meta.missing_values
+    assert metadata.missing_values["mynum"] == {"lo": 2000.0, "hi": 3000.0, "value": -1.0}
+    assert metadata.missing_values["myord"] == {"values": [-1.0, -2.0, -3.0]}
+    assert "mychar" not in metadata.missing_values
     assert default.column("mynum").null_count > kept.column("mynum").null_count
 
 
@@ -351,14 +351,14 @@ def test_sav_variable_without_a_display_format() -> None:
     name_at = data.index(b"NUM     ")
     blanked = data[: name_at - 8] + bytes(8) + data[name_at:]
 
-    table, meta = readstat_arrow.read_sav(io.BytesIO(blanked))
+    table, metadata = readstat_arrow.read_sav(io.BytesIO(blanked))
     schema, num_rows, metadata_only = readstat_arrow.read_sav_metadata(io.BytesIO(blanked))
 
-    assert "num" not in meta.formats  # the file declares none
-    assert meta.storage_widths == {"num": 8}  # and no format to read a declared width out of
+    assert "num" not in metadata.formats  # the file declares none
+    assert metadata.storage_widths == {"num": 8}  # and no format to read a declared width out of
     assert table.schema.field("num").type == pa.float64()  # nothing says it is a date
     assert table.column("num").to_pylist() == [1.0, 2.0]
-    assert (num_rows, schema, metadata_only) == (2, table.schema, meta)
+    assert (num_rows, schema, metadata_only) == (2, table.schema, metadata)
 
 
 def test_sav_utf8_string_values() -> None:
@@ -367,55 +367,55 @@ def test_sav_utf8_string_values() -> None:
 
 
 def test_sav_non_ascii_variable_name() -> None:
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "hebrews.sav")
+    table, metadata = readstat_arrow.read_sav(DATA_DIR / "hebrews.sav")
     assert table.column_names == ["ותק_ב"]
-    assert meta.formats["ותק_ב"] == "F8.0"
+    assert metadata.formats["ותק_ב"] == "F8.0"
 
 
 def test_sav_very_long_strings() -> None:
     """SPSS stores strings over 255 bytes in 252-byte segments; ReadStat reassembles them."""
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "test_width.sav")
+    table, metadata = readstat_arrow.read_sav(DATA_DIR / "test_width.sav")
 
-    assert meta.formats["StartDate"] == "A1024"
-    assert meta.storage_widths["StartDate"] == 1024
+    assert metadata.formats["StartDate"] == "A1024"
+    assert metadata.storage_widths["StartDate"] == 1024
     # SPSS pads short strings out to 8-byte cells (A18 occupies 24), but the width reported is A18's own.
-    assert meta.formats["ResponseId"] == "A18"
-    assert meta.storage_widths["ResponseId"] == 18
+    assert metadata.formats["ResponseId"] == "A18"
+    assert metadata.storage_widths["ResponseId"] == 18
     assert table.column("StartDate").to_pylist()[0] == "2020-07-13 23:19:55"
-    assert meta.formats["Duration__in_seconds_"] == "F40.2"
+    assert metadata.formats["Duration__in_seconds_"] == "F40.2"
 
 
 def test_sav_string_user_missing_values() -> None:
     """`MISSING VALUES mychar ('Z')`: a string value declared missing."""
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav")
+    table, metadata = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav")
     preserved, _ = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav", preserve_user_missing=True)
 
     assert table.column("mychar").to_pylist() == [None, "a"]
     assert preserved.column("mychar").to_pylist() == ["Z", "a"]
-    assert meta.missing_values["mychar"] == {"values": ["Z"]}
-    assert meta.value_labels["mychar"] == [{"value": "a", "label": "labeled"}]
+    assert metadata.missing_values["mychar"] == {"values": ["Z"]}
+    assert metadata.value_labels["mychar"] == [{"value": "a", "label": "labeled"}]
 
 
 def test_sav_missing_ranges_and_labelled_missing_values() -> None:
-    table, meta = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav")
+    table, metadata = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav")
     preserved, _ = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav", preserve_user_missing=True)
 
     # Three discrete missing values ...
-    assert meta.missing_values["x"] == {"values": [7.0, 8.0, 99.0]}
+    assert metadata.missing_values["x"] == {"values": [7.0, 8.0, 99.0]}
     assert table.column("x").to_pylist() == [1.0, 2.0, 3.0, 4.0, None, 9.0]
     assert preserved.column("x").to_pylist() == [1.0, 2.0, 3.0, 4.0, 8.0, 9.0]
     # ... and a discrete value plus a range. SPSS's `LO THRU 0` comes back with the
     # concrete lower bound ReadStat reports, not -inf.
-    assert meta.missing_values["z"] == {"lo": -999.0, "hi": 0.0, "value": 999.0}
+    assert metadata.missing_values["z"] == {"lo": -999.0, "hi": 0.0, "value": 999.0}
     assert table.column("z").to_pylist() == [None, None, 1.234, None, 3.14159, None]
     assert preserved.column("z").to_pylist() == [-9.0, None, 1.234, 999.0, 3.14159, None]
     # A missing value can itself carry a value label.
-    assert meta.value_labels["z"] == [{"value": 999.0, "label": "skipped"}]
+    assert metadata.value_labels["z"] == [{"value": 999.0, "label": "skipped"}]
 
 
 def test_sav_multiple_response_sets() -> None:
-    _schema, _rows, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
-    assert meta.multiple_response_sets == [
+    _schema, _rows, metadata = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
+    assert metadata.multiple_response_sets == [
         {
             "name": "categorical_array",
             "label": None,
@@ -439,12 +439,12 @@ def test_sav_multiple_response_sets() -> None:
 
 def test_dta_tagged_missing_values_are_null_by_default() -> None:
     """Stata's .a-.z are nulls in the table, indistinguishable from '.', unless asked for."""
-    table, meta = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta")
+    table, metadata = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta")
 
     assert table.schema.types == [pa.float32()] * 9
     assert table.to_pydict() == {f"var{i}": [None] for i in range(1, 9)} | {"var9": [1.0]}
     # A tag can carry a value label.
-    assert meta.value_labels["var1"] == [{"value": "a", "label": "missing"}]
+    assert metadata.value_labels["var1"] == [{"value": "a", "label": "missing"}]
 
 
 def test_dta_tagged_missing_values_as_structs() -> None:

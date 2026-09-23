@@ -25,11 +25,11 @@ def test_narrowing_never_changes_a_value(name: str) -> None:
     read = readstat_arrow.read_sav if name.endswith(".sav") else readstat_arrow.read_dta
     with warnings.catch_warnings():  # a few samples hold problems ReadStat recovers from
         warnings.simplefilter("ignore", readstat_arrow.ReadstatWarning)
-        wide, wide_meta = read(DATA_DIR / name)
-        narrow, narrow_meta = read(DATA_DIR / name, scan_and_narrow_types=True)
+        wide, wide_metadata = read(DATA_DIR / name)
+        narrow, narrow_metadata = read(DATA_DIR / name, scan_and_narrow_types=True)
 
     assert narrow.cast(wide.schema).equals(wide)
-    assert narrow_meta == wide_meta
+    assert narrow_metadata == wide_metadata
 
 
 def test_narrowing_measures_only_what_it_reads(fmt: FileFormat, tmp_path: Path) -> None:
@@ -95,7 +95,7 @@ def test_narrowing_reads_a_file_object_from_where_it_started(fmt: FileFormat) ->
 def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
     wide, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
 
-    narrow, meta = readstat_arrow.read_sav(DATA_DIR / "sample.sav", scan_and_narrow_types=True)
+    narrow, metadata = readstat_arrow.read_sav(DATA_DIR / "sample.sav", scan_and_narrow_types=True)
 
     assert narrow.schema == pa.schema(
         {
@@ -111,7 +111,7 @@ def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
     assert narrow.nbytes < wide.nbytes
     assert narrow.cast(wide.schema).equals(wide)
     # The metadata is the file's, untouched by the width the columns were read at.
-    assert meta == readstat_arrow.read_sav(DATA_DIR / "sample.sav")[1]
+    assert metadata == readstat_arrow.read_sav(DATA_DIR / "sample.sav")[1]
 
 
 def test_sav_narrowing_leaves_a_column_alone_when_nothing_narrower_holds_it() -> None:

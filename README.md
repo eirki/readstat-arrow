@@ -7,8 +7,8 @@ Arrow](https://arrow.apache.org/) tables, using the excellent
 ```python
 import readstat_arrow
 
-table, meta = readstat_arrow.read_sav("survey.sav")  # -> (pyarrow.Table, Metadata)
-readstat_arrow.write_dta("survey.dta", table, meta)  # the same pair back out, as Stata
+table, metadata = readstat_arrow.read_sav("survey.sav")  # -> (pyarrow.Table, Metadata)
+readstat_arrow.write_dta("survey.dta", table, metadata)  # the same pair back out, as Stata
 ```
 
 ## Motivation
@@ -37,9 +37,9 @@ added on request.
 import readstat_arrow
 
 # SPSS
-table, meta = readstat_arrow.read_sav("survey.sav")
+table, metadata = readstat_arrow.read_sav("survey.sav")
 # Stata:
-table, meta = readstat_arrow.read_dta("survey.dta")
+table, metadata = readstat_arrow.read_dta("survey.dta")
 
 ```
 
@@ -78,7 +78,7 @@ Metadata(
 ```python
 import readstat_arrow
 
-table, meta = readstat_arrow.read_sav("survey.sav")
+table, metadata = readstat_arrow.read_sav("survey.sav")
 
 # pandas:
 df = table.to_pandas()
@@ -97,7 +97,7 @@ from readstat_arrow import Metadata
 
 table = pa.table({"id": [1, 2, 3], "q1": [1, 5, 4], "q2": [10, 11, 2]})
 
-meta = Metadata(
+metadata = Metadata(
     file_label="2026 satisfaction survey",
     variable_labels={
         "id": "Respondent id",
@@ -115,9 +115,9 @@ meta = Metadata(
 )
 
 # SPSS:
-readstat_arrow.write_sav("survey.sav", table, meta)
+readstat_arrow.write_sav("survey.sav", table, metadata)
 # Stata:
-readstat_arrow.write_dta("survey.dta", table, meta)
+readstat_arrow.write_dta("survey.dta", table, metadata)
 ```
 
 ### Writing in batches
@@ -145,14 +145,14 @@ def my_data_source():
 # we need to know these up front:
 schema = pa.schema({"q1": pa.int8(), "q2": pa.int32(), "q3": pa.int32()})
 num_rows = 50
-meta = Metadata()
+metadata = Metadata()
 
 # SPSS:
-with readstat_arrow.SavWriter("survey.sav", schema, num_rows, meta) as writer:
+with readstat_arrow.SavWriter("survey.sav", schema, num_rows, metadata) as writer:
     for table in my_data_source():
         writer.write_table(table)
 # Stata:
-with readstat_arrow.DtaWriter("survey.dta", schema, num_rows, meta) as writer:
+with readstat_arrow.DtaWriter("survey.dta", schema, num_rows, metadata) as writer:
     for table in my_data_source():
         writer.write_table(table)
 
@@ -174,7 +174,7 @@ Stata tags its missings `.a` to `.z`, so every numeric column becomes a
 ```python
 import readstat_arrow
 
-table, meta = readstat_arrow.read_dta("panel.dta", preserve_user_missing=True)
+table, metadata = readstat_arrow.read_dta("panel.dta", preserve_user_missing=True)
 
 table.schema.field("income").type  # -> struct<value: double, tag: dictionary<int8, string>>
 table.column("income")[0].as_py()  # -> {"value": None, "tag": "a"}, Stata's .a
@@ -189,10 +189,10 @@ values were the missing ones:
 ```python
 import readstat_arrow
 
-default, meta = readstat_arrow.read_sav("survey.sav")
+default, metadata = readstat_arrow.read_sav("survey.sav")
 kept, _ = readstat_arrow.read_sav("survey.sav", preserve_user_missing=True)
 
-meta.missing_values["q1"]  # -> {"values": [9.0]}, declared by MISSING VALUES q1 (9)
+metadata.missing_values["q1"]  # -> {"values": [9.0]}, declared by MISSING VALUES q1 (9)
 
 default.column("q1")[0].as_py()  # -> None, the 9 collapsed to null
 kept.column("q1")[0].as_py()  # -> 9.0, the declared missing value itself
@@ -228,12 +228,12 @@ the `Metadata` object.
 ```python
 import readstat_arrow
 
-schema, num_rows, meta = readstat_arrow.read_dta_metadata("panel.dta")
+schema, num_rows, metadata = readstat_arrow.read_dta_metadata("panel.dta")
 
 schema.names  # -> ["id", "year", "income", ...], the variables in file order
 schema.field("income").type  # -> the type a full read would give that column
 num_rows  # -> 4_000_000, from the header
-meta.variable_labels["income"]  # -> "Annual income, NOK"
+metadata.variable_labels["income"]  # -> "Annual income, NOK"
 ```
 
 The row count is `None` where the file does not record one — Stata files always
@@ -248,7 +248,7 @@ Use `columns`, `row_offset` and `row_limit` to read parts of a file:
 ```python
 import readstat_arrow
 
-table, meta = readstat_arrow.read_dta(
+table, metadata = readstat_arrow.read_dta(
     "panel.dta",
     columns=["id", "income"],  # only these two; they come back in file order
     row_offset=1_000,  # skip the first 1_000 rows
@@ -274,7 +274,7 @@ need instead:
 ```python
 import readstat_arrow
 
-table, meta = readstat_arrow.read_sav("big.sav", scan_and_narrow_types=True)
+table, metadata = readstat_arrow.read_sav("big.sav", scan_and_narrow_types=True)
 
 table.schema.field("q1").type  # -> DataType(int8), where the file says double
 ```
@@ -411,14 +411,14 @@ import readstat_arrow
 
 # straight out of a zip archive, without extracting it
 with zipfile.ZipFile("survey.zip") as archive, archive.open("survey.sav") as member:
-    table, meta = readstat_arrow.read_sav(member)
+    table, metadata = readstat_arrow.read_sav(member)
 
 # or from bytes you already have in hand
-table, meta = readstat_arrow.read_sav(io.BytesIO(downloaded))
+table, metadata = readstat_arrow.read_sav(io.BytesIO(downloaded))
 
 # an open file works too, and is left open where reading stopped
 with open("survey.sav", "rb") as file:
-    schema, num_rows, meta = readstat_arrow.read_sav_metadata(file)
+    schema, num_rows, metadata = readstat_arrow.read_sav_metadata(file)
 ```
 
 The file object must be seekable, and is read from wherever it currently is - so

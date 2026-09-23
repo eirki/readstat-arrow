@@ -4,8 +4,8 @@ A thin, typed wrapper around the ReadStat C library. Every ``read_*`` function
 returns ``(pyarrow.Table, Metadata)``; ``write_*`` takes the same pair.
 
 >>> import readstat_arrow
->>> table, meta = readstat_arrow.read_sav("survey.sav")
->>> table.num_rows, meta.variable_labels["q1"], meta.value_labels["q1"]
+>>> table, metadata = readstat_arrow.read_sav("survey.sav")
+>>> table.num_rows, metadata.variable_labels["q1"], metadata.value_labels["q1"]
 """
 
 from importlib.metadata import version as _version

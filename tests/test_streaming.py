@@ -288,8 +288,8 @@ def test_converts_between_formats_a_batch_at_a_time(tmp_path: Path, fmt: FileFor
     assert reader.num_rows is not None
     with writer_class(out, reader.schema, reader.num_rows, reader.metadata) as writer:
         reader.read_batches(writer.write_batch)
-    round_tripped, round_tripped_meta = READER_FUNCS[other](out)
+    round_tripped, round_tripped_metadata = READER_FUNCS[other](out)
     expected, _ = read_whole(fmt)
     assert round_tripped.num_rows == expected.num_rows
     assert round_tripped.column("mychar").equals(expected.column("mychar"))
-    assert round_tripped_meta.variable_labels == reader.metadata.variable_labels
+    assert round_tripped_metadata.variable_labels == reader.metadata.variable_labels
