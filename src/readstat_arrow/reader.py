@@ -39,14 +39,16 @@ TAG_TYPE = pa.dictionary(pa.int8(), pa.string())
 DEFAULT_BATCH_ROWS = 65_536
 
 # The signed integer types a column can be narrowed to, narrowest first, with the
-# range each one holds. There is no int64: a double already holds every integer
-# up to 2^53 in the same 8 bytes, so nothing is saved below that and nothing is
-# exact above it. Unsigned types are left out too - they would buy one bit at the
-# cost of a type most consumers of the table handle less well.
+# range each one holds. int64 saves no space over the double a file stores - both
+# are 8 bytes - but it is the cleaner type for a column of whole numbers, and it
+# keeps a table of integer columns from having one of them stand out as a float.
+# Unsigned types are left out - they would buy one bit at the cost of a type most
+# consumers of the table handle less well.
 _INT_TYPES: tuple[tuple[pa.DataType, int, int], ...] = (
     (pa.int8(), -(2**7), 2**7 - 1),
     (pa.int16(), -(2**15), 2**15 - 1),
     (pa.int32(), -(2**31), 2**31 - 1),
+    (pa.int64(), -(2**63), 2**63 - 1),
 )
 
 _READ_DOC = """
@@ -78,7 +80,7 @@ _READ_DOC = """
         The scan keeps a few scalars per column and no values at all, so the file
         is parsed twice but never held twice: the trade is time for memory, at
         about twice the wall clock of a plain read. The widths it settles on are
-        ``int8``/``int16``/``int32`` where every value was a whole number,
+        ``int8``/``int16``/``int32``/``int64`` where every value was a whole number,
         ``float32`` where every value survives one, else ``float64``; strings are
         untouched, and a column of nothing but nulls comes back as ``int8``. A
         value that does not fit the width measured for it raises

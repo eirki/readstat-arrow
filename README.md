@@ -284,8 +284,9 @@ then once to read them at the widths that fit — so the trade is time for memor
 
 Only a type that holds the column exactly is ever chosen: integer types when
 every value was a whole number, `float32` when every value round-trips through
-it, else `float64`. The ladder is `int8`, `int16`, `int32`, `float32`,
-`float64`. Strings are untouched.
+it, else `float64`. The ladder is `int8`, `int16`, `int32`, `int64`,
+`float32`, `float64` — `int64` saves nothing over the stored double, but it is
+the cleaner type for a column of whole numbers. Strings are untouched.
 
 ### Reading in batches
 

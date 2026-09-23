@@ -122,14 +122,17 @@ K_DOUBLE = cython.declare(cython.int, 5)
 # doubles and are range-checked on the way in. Kept out of the tables below,
 # which are keyed by the type a column actually has.
 K_NARROWED = cython.declare(cython.int, 6)
+# No format stores an int64, so a column is only ever this kind because one was
+# asked for, which means it always reads through ``K_NARROWED``.
+K_INT64 = cython.declare(cython.int, 7)
 
-_ITEM_SIZE = {K_INT8: 1, K_INT16: 2, K_INT32: 4, K_FLOAT: 4, K_DOUBLE: 8}
-_STRUCT_FMT = {K_INT8: "b", K_INT16: "h", K_INT32: "i", K_FLOAT: "f", K_DOUBLE: "d"}
+_ITEM_SIZE = {K_INT8: 1, K_INT16: 2, K_INT32: 4, K_INT64: 8, K_FLOAT: 4, K_DOUBLE: 8}
 _ARROW_TYPE = {
     K_STRING: pa.large_string(),
     K_INT8: pa.int8(),
     K_INT16: pa.int16(),
     K_INT32: pa.int32(),
+    K_INT64: pa.int64(),
     K_FLOAT: pa.float32(),
     K_DOUBLE: pa.float64(),
 }
@@ -144,6 +147,10 @@ _INT16_MIN = cython.declare(cython.double, -32768.0)
 _INT16_MAX = cython.declare(cython.double, 32767.0)
 _INT32_MIN = cython.declare(cython.double, -2147483648.0)
 _INT32_MAX = cython.declare(cython.double, 2147483647.0)
+# int64's bounds as doubles: the minimum is exact, but 2^63 - 1 is not a double -
+# the nearest one is 2^63 - so the upper test is a strict one against that.
+_INT64_MIN = cython.declare(cython.double, -9223372036854775808.0)
+_INT64_LIMIT = cython.declare(cython.double, 9223372036854775808.0)
 
 # set_checked outcomes; it cannot raise, so the caller turns these into errors.
 FITS = cython.declare(cython.int, 0)
@@ -241,6 +248,7 @@ class ColumnBuilder:
     _i8: cython.schar[::1]
     _i16: cython.short[::1]
     _i32: cython.int[::1]
+    _i64: cython.longlong[::1]
     _off: cython.longlong[::1]
 
     # Stata tagged missing values (.a-.z): one byte per row, 0 = no tag, 1..26 = a..z.
@@ -283,6 +291,7 @@ class ColumnBuilder:
         self._i8 = None
         self._i16 = None
         self._i32 = None
+        self._i64 = None
         self._off = None
 
     @cython.cfunc
@@ -303,6 +312,8 @@ class ColumnBuilder:
             self._i16 = memoryview(self.data).cast("h")
         elif k == K_INT32:
             self._i32 = memoryview(self.data).cast("i")
+        elif k == K_INT64:
+            self._i64 = memoryview(self.data).cast("q")
 
     @cython.cfunc
     def _reserve(self, capacity: cython.Py_ssize_t) -> cython.void:
@@ -395,6 +406,13 @@ class ColumnBuilder:
         self._set_valid(row)
 
     @cython.cfunc
+    @cython.inline
+    def set_int64(self, row: cython.Py_ssize_t, v: cython.longlong) -> cython.void:
+        self.ensure_row(row)
+        self._i64[row] = v
+        self._set_valid(row)
+
+    @cython.cfunc
     def set_string(self, row: cython.Py_ssize_t, s: cython.p_const_char) -> cython.void:
         self.ensure_row(row)
         n: cython.size_t = 0 if s is cython.NULL else strlen(s)
@@ -437,6 +455,10 @@ class ColumnBuilder:
             if v < _INT32_MIN or v > _INT32_MAX:
                 return OUT_OF_RANGE
             self.set_int32(row, cython.cast(cython.int, v))
+        elif k == K_INT64:
+            if v < _INT64_MIN or v >= _INT64_LIMIT:
+                return OUT_OF_RANGE
+            self.set_int64(row, cython.cast(cython.longlong, v))
         else:
             return OUT_OF_RANGE  # K_STRING, which _requested_kind never allows here
         return FITS

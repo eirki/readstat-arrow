@@ -92,7 +92,6 @@ _READSTAT_TYPE = {
     K_FLOAT: READSTAT_TYPE_FLOAT,
     K_DOUBLE: READSTAT_TYPE_DOUBLE,
 }
-_STRUCT_FMT = {K_INT8: "b", K_INT16: "h", K_INT32: "i", K_FLOAT: "f", K_DOUBLE: "d"}
 
 
 @cython.cfunc

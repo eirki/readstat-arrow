@@ -63,6 +63,20 @@ def test_float32_is_used_when_every_value_survives_it(fmt: FileFormat, tmp_path:
     assert table.column("x").to_pylist() == [0.5, -1.25, None]
 
 
+def test_int64_is_used_for_whole_numbers_too_large_for_int32(fmt: FileFormat, tmp_path: Path) -> None:
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    path = tmp_path / f"large.{fmt}"
+    write(path, pa.table({"x": pa.array([1e15, -2e15, 3.0, None], pa.float64())}))
+
+    table, _ = read(path, scan_and_narrow_types=True)
+
+    # No narrower than the double the file stores, but a cleaner type for a
+    # column that holds nothing but whole numbers.
+    assert table.schema.field("x").type == pa.int64()
+    assert table.column("x").to_pylist() == [10**15, -2 * 10**15, 3, None]
+
+
 def test_narrowing_reads_a_file_object_from_where_it_started(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
     padding = b"\x00" * 7
