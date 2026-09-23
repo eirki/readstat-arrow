@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import pyarrow as pa
@@ -25,11 +26,10 @@ def test_narrowing_never_changes_a_value(name: str) -> None:
     read = readstat_arrow.read_sav if name.endswith(".sav") else readstat_arrow.read_dta
     with warnings.catch_warnings():  # a few samples hold problems ReadStat recovers from
         warnings.simplefilter("ignore", readstat_arrow.ReadstatWarning)
-        wide, wide_metadata = read(DATA_DIR / name)
-        narrow, narrow_metadata = read(DATA_DIR / name, scan_and_narrow_types=True)
+        wide, _wide_metadata = read(DATA_DIR / name)
+        narrow, _narrow_metadata = read(DATA_DIR / name, scan_and_narrow_types=True)
 
     assert narrow.cast(wide.schema).equals(wide)
-    assert narrow_metadata == wide_metadata
 
 
 def test_narrowing_measures_only_what_it_reads(fmt: FileFormat, tmp_path: Path) -> None:
@@ -110,8 +110,35 @@ def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
     )
     assert narrow.nbytes < wide.nbytes
     assert narrow.cast(wide.schema).equals(wide)
-    # The metadata is the file's, untouched by the width the columns were read at.
-    assert metadata == readstat_arrow.read_sav(DATA_DIR / "sample.sav")[1]
+    # The metadata is the file's, untouched by the width the columns were read at -
+    # except for the value labels, whose codes follow the column they label.
+    wide_metadata = readstat_arrow.read_sav(DATA_DIR / "sample.sav")[1]
+    assert replace(metadata, value_labels={}) == replace(wide_metadata, value_labels={})
+    assert metadata.value_labels["mylabl"] is not None
+    male, female = metadata.value_labels["mylabl"]
+    assert (male, female) == ({"value": 1, "label": "Male"}, {"value": 2, "label": "Female"})
+    # ... and 1.0 == 1, so the type is what the assertions above cannot say.
+    assert isinstance(male["value"], int)
+    assert isinstance(female["value"], int)
+
+    assert wide_metadata.value_labels["mylabl"] is not None
+    wide_male, wide_female = wide_metadata.value_labels["mylabl"]  # the .sav stores doubles
+    assert isinstance(wide_male["value"], float)
+    assert isinstance(wide_female["value"], float)
+
+
+def test_narrowing_leaves_the_codes_of_a_column_it_did_not_narrow_alone(tmp_path: Path) -> None:
+    """A label on a column that stays a double keeps its float code."""
+    path = tmp_path / "mixed.sav"
+    readstat_arrow.write_sav(
+        path,
+        pa.table({"n": pa.array([1.5, 2.0])}),
+        readstat_arrow.Metadata(value_labels={"n": [{"value": 1.5, "label": "half"}]}),
+    )
+
+    _table, metadata = readstat_arrow.read_sav(path, scan_and_narrow_types=True)
+
+    assert metadata.value_labels["n"] == [{"value": 1.5, "label": "half"}]
 
 
 def test_sav_narrowing_leaves_a_column_alone_when_nothing_narrower_holds_it() -> None:

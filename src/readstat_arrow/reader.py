@@ -85,7 +85,8 @@ _READ_DOC = """
         untouched, and a column of nothing but nulls comes back as ``int8``. A
         value that does not fit the width measured for it raises
         :class:`~readstat_arrow.ReadstatError` rather than wrapping around, which
-        no file that holds still between the two passes can provoke.
+        no file that holds still between the two passes can provoke. The value
+        labels of a column narrowed to an integer type get integer codes.
     preserve_user_missing:
         Keep the file's user-level missing information instead of collapsing it
         to null. By default every kind of missing is an Arrow null. With ``True``:
@@ -448,6 +449,7 @@ def _open(
             path, file, file_format, columns, row_limit, row_offset, encoding, preserve_user_missing
         )
 
+    metadata = _int_value_labels(metadata, types)
     read_schema = _selected_schema(stored_schema, names, types)
     schema = _convert_date_types(read_schema, metadata, file_format)
     tagged = preserve_user_missing and SUPPORTS_TAGGED_MISSING[file_format]
@@ -488,6 +490,30 @@ def _selected_schema(
     if types is not None:
         fields = [field_.with_type(types.get(field_.name, field_.type)) for field_ in fields]
     return pa.schema(fields)
+
+
+def _int_value_labels(metadata: Metadata, types: dict[str, pa.DataType] | None) -> Metadata:
+    """Retype the codes of any column a scan narrowed to an integer type.
+
+    A .sav stores every numeric value as a double, so its value labels arrive as
+    floats even when the column they label is read as integer. Once narrowing
+    has settled on an integer type, the codes are converted to integers too.
+    """
+    if not types:
+        return metadata
+    labels = dict(metadata.value_labels)
+    changed = False
+    for name, codes in metadata.value_labels.items():
+        if codes is None or not pa.types.is_integer(types.get(name, pa.float64())):
+            continue
+        labels[name] = [
+            {**code, "value": int(code["value"])}
+            if isinstance(code["value"], float) and code["value"].is_integer()
+            else code
+            for code in codes
+        ]
+        changed = True
+    return replace(metadata, value_labels=labels) if changed else metadata
 
 
 def _for_columns(metadata: Metadata, columns: list[str] | None) -> Metadata:
@@ -536,7 +562,7 @@ def _read_data(
         preserve_user_missing=preserve_user_missing,
     )
     _emit_warnings(messages)
-    metadata = _normalise_widths(metadata, file_format)
+    metadata = _int_value_labels(_normalise_widths(metadata, file_format), types)
     table = pa.Table.from_arrays(arrays, schema=table_schema)
 
     table = _convert_dates(table, metadata, file_format)
