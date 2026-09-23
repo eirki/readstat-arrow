@@ -4,8 +4,7 @@
 """Cython (pure Python mode) bridge between ReadStat's callback API and Arrow buffers.
 
 ReadStat parses a file and calls back into us once for the file metadata, once
-per variable, and once per (row, variable) cell.  Instead of materialising a
-Python object per cell (what pyreadstat does), each :class:`ColumnBuilder`
+per variable, and once per (row, variable) cell.  Each :class:`ColumnBuilder`
 writes straight into contiguous byte buffers laid out exactly as Arrow expects
 them, so the final ``pyarrow.Array`` is created with zero copies via
 ``pa.Array.from_buffers``.
@@ -585,8 +584,13 @@ class ParseContext:
     metadata_only: cython.bint
     scan: cython.bint  # summarise the values instead of storing them
     preserve_user_missing: cython.bint
-    row_count: cython.Py_ssize_t  # -1 when unknown
+    num_rows: cython.Py_ssize_t  # -1 when unknown
     rows_seen: cython.Py_ssize_t
+    # Batching: hand each ``batch_rows`` rows to ``on_batch`` and start over, so
+    # the buffers never hold more than one batch. 0 means accumulate the lot.
+    batch_rows: cython.Py_ssize_t
+    batch_start: cython.Py_ssize_t  # absolute row index the builders start at
+    on_batch: object  # callable(arrays, tags) | None
     file_label: object
     multiple_response_sets: list
     # ReadStat label-set name -> list[Code], created on first mention by either the
@@ -615,8 +619,11 @@ class ParseContext:
         self.metadata_only = False
         self.scan = False
         self.preserve_user_missing = False
-        self.row_count = -1
+        self.num_rows = -1
         self.rows_seen = 0
+        self.batch_rows = 0
+        self.batch_start = 0
+        self.on_batch = None
         self.file_label = None
         self.multiple_response_sets = []
         self.label_sets = {}
@@ -655,7 +662,7 @@ def _label_set(ctx: ParseContext, name: str) -> list:
 def _handle_metadata(meta: cython.pointer(readstat_metadata_t), vctx: cython.p_void) -> cython.int:
     ctx: ParseContext = cython.cast(ParseContext, vctx)
     try:
-        ctx.row_count = readstat_get_row_count(meta)
+        ctx.num_rows = readstat_get_row_count(meta)
         mr_sets = []
         n_mr: cython.size_t = readstat_get_multiple_response_sets_length(meta)
         mr: cython.pointer(mr_set_t) = cython.cast(
@@ -743,9 +750,11 @@ def _handle_variable(
         if ctx.scan:
             ctx.stats.append(StatsAccumulator(name, kind))
         elif not ctx.metadata_only:
-            capacity: cython.Py_ssize_t = (
-                ctx.row_count if ctx.row_count >= 0 else _INITIAL_CAPACITY_UNKNOWN_ROWS
-            )
+            # Batching fixes the capacity at one batch; otherwise the whole file
+            # has to fit, which is a guess when the header does not say how long it is.
+            capacity: cython.Py_ssize_t = ctx.batch_rows
+            if capacity == 0:
+                capacity = ctx.num_rows if ctx.num_rows >= 0 else _INITIAL_CAPACITY_UNKNOWN_ROWS
             builder: ColumnBuilder = ColumnBuilder(name, kind, capacity)
             if narrowed:
                 builder.store = K_NARROWED
@@ -822,6 +831,29 @@ def _narrowing_failed(
     )
 
 
+def _emit_batch(ctx: ParseContext, n_rows: cython.Py_ssize_t) -> None:
+    """Hand ``n_rows`` rows to ``on_batch`` and start the builders over.
+
+    The builders are replaced rather than rewound: :meth:`ColumnBuilder.to_arrow`
+    hands their buffers to Arrow without copying, so the batch that just left
+    owns them now.
+    """
+    arrays = []
+    tags = []
+    fresh = []
+    for b in ctx.builders:
+        col: ColumnBuilder = cython.cast(ColumnBuilder, b)
+        if col.length < n_rows:  # trailing rows whose cells never arrived
+            col.ensure_row(n_rows - 1)
+        arrays.append(col.to_arrow())
+        tags.append(col.tags_to_arrow())
+        new: ColumnBuilder = ColumnBuilder(col.name, col.kind, ctx.batch_rows)
+        new.store = col.store
+        fresh.append(new)
+    ctx.builders = fresh
+    ctx.on_batch(arrays, tags)
+
+
 @cython.cfunc
 @cython.exceptval(check=False)
 def _handle_value(
@@ -833,9 +865,16 @@ def _handle_value(
     ctx: ParseContext = cython.cast(ParseContext, vctx)
     try:
         col_index: cython.int = readstat_variable_get_index_after_skipping(variable)
-        row: cython.Py_ssize_t = obs_index
-        if row + 1 > ctx.rows_seen:
-            ctx.rows_seen = row + 1
+        if obs_index + 1 > ctx.rows_seen:
+            ctx.rows_seen = obs_index + 1
+        # Rows are indexed from the start of the current batch, which without
+        # batching is the start of the file.
+        row: cython.Py_ssize_t = obs_index - ctx.batch_start
+        if row >= ctx.batch_rows and ctx.batch_rows > 0:
+            # The first cell of the row past the batch: every earlier row is complete.
+            _emit_batch(ctx, ctx.batch_rows)
+            ctx.batch_start = obs_index
+            row = 0
 
         col: ColumnBuilder = cython.cast(ColumnBuilder, ctx.builders[col_index])
         if readstat_value_is_missing(value, variable):
@@ -1044,6 +1083,8 @@ def parse(
     row_offset: int = 0,
     encoding: str | None = None,
     preserve_user_missing: bool = False,
+    batch_rows: int = 0,
+    on_batch=None,
 ) -> tuple[list, list, object, Metadata, int | None, list, list]:
     """Parse ``path``, or the seekable binary ``file`` object, with ReadStat.
 
@@ -1055,7 +1096,14 @@ def parse(
     ``types`` maps a variable name to the Arrow type to read it into instead of
     the one the file stores it as, which is how a scan's findings are used.
 
-    Returns ``(arrays, tags, schema, metadata, row_count, warnings, stats)``: one
+    ``batch_rows`` with ``on_batch`` reads in batches: every ``batch_rows`` rows
+    (and once more for the remainder) ``on_batch(arrays, tags)`` is called with
+    that slice of the columns and the builders start over, so no more than one
+    batch is ever held. ``arrays`` and ``tags`` in the return value are then
+    empty - the batches were the data. Anything ``on_batch`` raises aborts the
+    parse and propagates.
+
+    Returns ``(arrays, tags, schema, metadata, num_rows, warnings, stats)``: one
     ``pyarrow.Array`` per column and, per column, its Stata tagged-missing letters
     as a dictionary array or ``None`` (both lists empty when ``metadata_only`` or
     ``scan``); the ``pyarrow.Schema`` of the variables as they are read, filled in
@@ -1070,11 +1118,17 @@ def parse(
         raise ValueError("pass exactly one of path and file")
     if metadata_only and scan:
         raise ValueError("pass at most one of metadata_only and scan")
+    if (batch_rows > 0) != (on_batch is not None):
+        raise ValueError("pass batch_rows and on_batch together, or neither")
+    if batch_rows and (metadata_only or scan):
+        raise ValueError("batch_rows reads values, so it goes with neither metadata_only nor scan")
 
     ctx: ParseContext = ParseContext()
     ctx.metadata_only = metadata_only
     ctx.scan = scan
     ctx.preserve_user_missing = preserve_user_missing
+    ctx.batch_rows = batch_rows
+    ctx.on_batch = on_batch
     if columns is not None:
         ctx.columns = frozenset(columns)
     if types is not None:
@@ -1139,15 +1193,19 @@ def parse(
     arrays = []
     tags = []
     if not metadata_only and not scan:
-        n_rows: cython.Py_ssize_t = ctx.rows_seen
-        for b in ctx.builders:
-            col: ColumnBuilder = cython.cast(ColumnBuilder, b)
-            # A column that never received a value (e.g. zero-row file) must still
-            # have the right length.
-            if col.length < n_rows:
-                col.ensure_row(n_rows - 1)
-            arrays.append(col.to_arrow())
-            tags.append(col.tags_to_arrow())
+        n_rows: cython.Py_ssize_t = ctx.rows_seen - ctx.batch_start
+        if batch_rows:
+            if n_rows > 0:  # the remainder; exactly nothing when the rows divided evenly
+                _emit_batch(ctx, n_rows)
+        else:
+            for b in ctx.builders:
+                col: ColumnBuilder = cython.cast(ColumnBuilder, b)
+                # A column that never received a value (e.g. zero-row file) must still
+                # have the right length.
+                if col.length < n_rows:
+                    col.ensure_row(n_rows - 1)
+                arrays.append(col.to_arrow())
+                tags.append(col.tags_to_arrow())
 
     metadata = Metadata(
         variable_labels=ctx.variable_labels,
@@ -1167,11 +1225,11 @@ def parse(
         notes=ctx.notes,
         multiple_response_sets=ctx.multiple_response_sets,
     )
-    row_count: object = None
-    if ctx.row_count >= 0:
-        row_count = int(ctx.row_count)
+    num_rows: object = None
+    if ctx.num_rows >= 0:
+        num_rows = int(ctx.num_rows)
     elif not metadata_only:
-        row_count = int(ctx.rows_seen)
+        num_rows = int(ctx.rows_seen)
     schema = pa.schema(list(zip(ctx.variables, ctx.column_types, strict=True)))
     stats = [cython.cast(StatsAccumulator, acc).to_dict() for acc in ctx.stats]
-    return arrays, tags, schema, metadata, row_count, ctx.warnings, stats
+    return arrays, tags, schema, metadata, num_rows, ctx.warnings, stats

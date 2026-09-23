@@ -21,12 +21,22 @@ from readstat_arrow.metadata import (
     MissingValues,
     Value,
 )
-from readstat_arrow.reader import read_dta, read_dta_metadata, read_sav, read_sav_metadata
+from readstat_arrow.reader import (
+    DtaStreamingReader,
+    SavStreamingReader,
+    open_dta,
+    open_sav,
+    read_dta,
+    read_dta_metadata,
+    read_sav,
+    read_sav_metadata,
+)
 from readstat_arrow.writer import DtaWriter, SavWriter, write_dta, write_sav
 
 __all__ = [
     "Alignment",
     "Code",
+    "DtaStreamingReader",
     "DtaWriter",
     "Measure",
     "Metadata",
@@ -35,8 +45,11 @@ __all__ = [
     "Missingness",
     "ReadstatError",
     "ReadstatWarning",
+    "SavStreamingReader",
     "SavWriter",
     "Value",
+    "open_dta",
+    "open_sav",
     "read_dta",
     "read_dta_metadata",
     "read_sav",

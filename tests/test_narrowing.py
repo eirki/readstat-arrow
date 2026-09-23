@@ -101,7 +101,7 @@ def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
 
 
 def test_sav_narrowing_leaves_a_column_alone_when_nothing_narrower_holds_it() -> None:
-    _, stored, _ = readstat_arrow.read_sav_metadata(DATA_DIR / "test_width.sav")
+    stored, _, _ = readstat_arrow.read_sav_metadata(DATA_DIR / "test_width.sav")
     narrow, _ = readstat_arrow.read_sav(DATA_DIR / "test_width.sav", scan_and_narrow_types=True)
 
     assert stored.field("ResponseId").type == pa.large_string()
@@ -143,7 +143,7 @@ def test_sav_narrowing_sees_user_missing_values_when_the_read_keeps_them(tmp_pat
 
 
 def test_narrowing_on_a_dta_whose_types_are_already_narrow() -> None:
-    _, stored, _ = readstat_arrow.read_dta_metadata(DATA_DIR / "sample.dta")
+    stored, _, _ = readstat_arrow.read_dta_metadata(DATA_DIR / "sample.dta")
     narrow, _ = readstat_arrow.read_dta(DATA_DIR / "sample.dta", scan_and_narrow_types=True)
 
     assert stored.field("mylabl").type == pa.int8()  # Stata stores small integers as int8

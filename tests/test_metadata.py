@@ -41,7 +41,7 @@ YES_NO: dict[FileFormat, list[Code]] = {
 
 def test_mappings_hold_only_what_the_file_declares(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    _, schema, meta = read_metadata(SAMPLES[fmt])
+    schema, _num_rows, meta = read_metadata(SAMPLES[fmt])
 
     assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
     assert meta.variable_labels["mychar"] == "character"
@@ -69,7 +69,7 @@ def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
     write(shared, table, meta)  # identical lists -> one label set
 
     shared.seek(0)
-    _, _schema, back = read_metadata(shared)
+    _schema, _num_rows, back = read_metadata(shared)
     q1, q2 = back.value_labels["q1"], back.value_labels["q2"]
     assert q1 == q2 == YES_NO[fmt]
     assert q1 is not q2
@@ -78,7 +78,7 @@ def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
 
 def test_rename_variable(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    _, _schema, meta = read_metadata(SAMPLES[fmt])
+    _schema, _num_rows, meta = read_metadata(SAMPLES[fmt])
 
     renamed = meta.rename_variable("mylabl", "sex")
 
@@ -129,8 +129,8 @@ def _rename_all(meta: Metadata, names: list[str], *, suffix: str) -> Metadata:
 
 
 def test_sav_merge() -> None:
-    _, _sav_schema, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-    _, other_schema, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
+    _sav_schema, _num_rows, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    other_schema, _other_num_rows, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
     # Give the second file distinct variable names, as if it were another block of columns.
     other = _rename_all(other, other_schema.names, suffix="_b")
 
@@ -145,7 +145,7 @@ def test_sav_merge() -> None:
 
 
 def test_sav_merge_prefers_self_on_overlap() -> None:
-    _, schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    schema, _num_rows, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
     labels: dict[str, str | None] = {name: "other" for name in schema.names}
     labels["extra"] = "Extra"
     other = replace(meta, variable_labels=labels)

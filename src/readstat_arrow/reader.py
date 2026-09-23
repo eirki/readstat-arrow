@@ -1,12 +1,14 @@
-"""Public reading API: ``read_sav`` / ``read_dta`` and their ``*_metadata`` variants."""
+"""Public reading API: ``read_sav`` / ``read_dta``, their ``*_metadata`` variants,
+and the incremental ``open_sav`` / ``open_dta``."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import typing as t
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 
 import pyarrow as pa
@@ -16,14 +18,25 @@ from readstat_arrow import _dates
 from readstat_arrow._cython import parser as _parser
 from readstat_arrow._formats import SUPPORTS_TAGGED_MISSING, FileFormat
 from readstat_arrow.errors import ReadstatWarning
-from readstat_arrow.metadata import Metadata
+from readstat_arrow.metadata import PER_VARIABLE, Metadata
 
-__all__ = ["read_dta", "read_dta_metadata", "read_sav", "read_sav_metadata"]
+__all__ = [
+    "DtaStreamingReader",
+    "SavStreamingReader",
+    "open_dta",
+    "open_sav",
+    "read_dta",
+    "read_dta_metadata",
+    "read_sav",
+    "read_sav_metadata",
+]
 
 PathLike = str | os.PathLike[str] | bytes
 
 # Type of the ``tag`` field when Stata tagged missings are preserved.
 TAG_TYPE = pa.dictionary(pa.int8(), pa.string())
+
+DEFAULT_BATCH_ROWS = 65_536
 
 # The signed integer types a column can be narrowed to, narrowest first, with the
 # range each one holds. There is no int64: a double already holds every integer
@@ -145,12 +158,12 @@ for _fn in (read_sav, read_dta):
 
 def read_sav_metadata(
     where: PathLike | t.IO[bytes], *, encoding: str | None = None
-) -> tuple[int | None, pa.Schema, Metadata]:
+) -> tuple[pa.Schema, int | None, Metadata]:
     """Read only the metadata of an SPSS ``.sav`` file; no data rows are decoded.
 
     Takes a path or a seekable binary file object, as :func:`read_sav` does.
 
-    Returns ``(row_count, schema, metadata)``: the ``pyarrow.Schema`` a full read
+    Returns ``(schema, num_rows, metadata)``: the ``pyarrow.Schema`` a full read
     would give the table - variable names in file order, with the type each column
     would come back as - and everything the file declares about the variables. The
     row count comes from the file header and is ``None`` when the file does not
@@ -164,18 +177,332 @@ def read_sav_metadata(
 
 def read_dta_metadata(
     where: PathLike | t.IO[bytes], *, encoding: str | None = None
-) -> tuple[int | None, pa.Schema, Metadata]:
+) -> tuple[pa.Schema, int | None, Metadata]:
     """Read only the metadata of a Stata ``.dta`` file; no data rows are decoded.
 
-    Returns ``(row_count, schema, metadata)`` as :func:`read_sav_metadata` does;
+    Returns ``(schema, num_rows, metadata)`` as :func:`read_sav_metadata` does;
     Stata files always record the row count.
     """
     return _read_metadata(where, "dta", encoding)
 
 
+def open_sav(
+    where: PathLike | t.IO[bytes],
+    *,
+    columns: Iterable[str] | None = None,
+    row_limit: int = 0,
+    row_offset: int = 0,
+    encoding: str | None = None,
+    scan_and_narrow_types: bool = False,
+    preserve_user_missing: bool = False,
+) -> SavStreamingReader:
+    """Open an SPSS ``.sav`` file for incremental reading."""
+    return t.cast(
+        SavStreamingReader,
+        _open(
+            where,
+            "sav",
+            columns,
+            row_limit,
+            row_offset,
+            encoding,
+            scan_and_narrow_types,
+            preserve_user_missing,
+        ),
+    )
+
+
+def open_dta(
+    where: PathLike | t.IO[bytes],
+    *,
+    columns: Iterable[str] | None = None,
+    row_limit: int = 0,
+    row_offset: int = 0,
+    encoding: str | None = None,
+    scan_and_narrow_types: bool = False,
+    preserve_user_missing: bool = False,
+) -> DtaStreamingReader:
+    """Open a Stata ``.dta`` file for incremental reading."""
+    return t.cast(
+        DtaStreamingReader,
+        _open(
+            where,
+            "dta",
+            columns,
+            row_limit,
+            row_offset,
+            encoding,
+            scan_and_narrow_types,
+            preserve_user_missing,
+        ),
+    )
+
+
+_OPEN_DOC = """
+    Reads a batch of rows at a time instead of the whole file at once, so a file
+    larger than memory can be converted to something column-oriented - Parquet,
+    say - a batch at a time:
+
+    >>> import pyarrow.parquet as pq
+    >>> reader = readstat_arrow.open_sav("big.sav")
+    >>> with pq.ParquetWriter("big.parquet", reader.schema) as writer:
+    ...     reader.read_batches(writer.write_batch)
+
+    The parse drives:
+    :meth:`~readstat_arrow.SavStreamingReader.read_batches` calls ``callback``
+    with each batch in turn, which is the shape ReadStat's own callbacks give
+    and so costs no buffering and no thread. There is nothing to close, and
+    nothing stopping a second read.
+
+    Parameters
+    ----------
+    where, columns, row_limit, row_offset, encoding, preserve_user_missing:
+        As :func:`read_sav`, except that a file object is left where it began
+        rather than where reading stopped, so that reading again reads the same
+        bytes. It must be left alone while the reader is using it.
+    scan_and_narrow_types:
+        As :func:`read_sav`, and worth rather more here: the scan keeps no values,
+        so the narrow types it settles on are the ones every batch is read into,
+        and the pass it costs is the only thing between a file and a narrowly
+        typed copy of it that neither side ever holds whole.
+
+    Returns
+    -------
+    reader:
+        A :class:`~readstat_arrow.SavStreamingReader` /
+        :class:`~readstat_arrow.DtaStreamingReader`, which also carries the
+        ``schema``, ``num_rows`` and :class:`~readstat_arrow.Metadata` the file
+        declares. Opening reads that metadata and nothing else; not a row is
+        touched until :meth:`~readstat_arrow.SavStreamingReader.read_batches` or
+        :meth:`~readstat_arrow.SavStreamingReader.read_all` is called.
+"""
+
+for _open_fn in (open_sav, open_dta):
+    _open_fn.__doc__ = (_open_fn.__doc__ or "") + _OPEN_DOC
+
+
+class _StreamingReader:
+    """Shared implementation of :class:`SavStreamingReader` and :class:`DtaStreamingReader`.
+
+    Holds what the file declares - :attr:`schema`, :attr:`metadata`,
+    :attr:`num_rows`, all read before a single row is touched - and hands the
+    rows over a batch at a time through :meth:`read_batches`.
+
+    ReadStat parses a whole file in one call, pushing a value at a time at us, so
+    that is the shape the rows come in: the parse drives and the caller supplies
+    a callback. Nothing is buffered, nothing is held between opening and reading,
+    and no thread is involved.
+    """
+
+    _file_format: FileFormat
+
+    #: The schema every batch has.
+    schema: pa.Schema
+
+    #: What the file declares about the variables being read.
+    metadata: Metadata
+
+    #: Rows in the file as its header records them, or ``None`` where it does not
+    #: (some non-SPSS writers omit it); what ``row_limit``/``row_offset`` will
+    #: actually yield is not taken off it. The writers in this package need it up
+    #: front, which is why it is here rather than in :attr:`metadata`.
+    num_rows: int | None
+
+    def __init__(
+        self,
+        path: bytes | None,
+        file: t.IO[bytes] | None,
+        *,
+        schema: pa.Schema,
+        read_schema: pa.Schema,
+        metadata: Metadata,
+        num_rows: int | None,
+        tagged: bool,
+        parse_kwargs: dict[str, t.Any],
+    ) -> None:
+        self.schema = schema
+        self.metadata = metadata
+        self.num_rows = num_rows
+        self._read_schema = read_schema  # what a batch's arrays are, before converting
+        self._tagged = tagged
+        self._path = path
+        self._file = file
+        self._parse_kwargs = parse_kwargs
+
+    def read_batches(
+        self,
+        callback: t.Callable[[pa.RecordBatch], object],
+        *,
+        batch_rows: int = DEFAULT_BATCH_ROWS,
+    ) -> int:
+        """Read the file, handing each batch to ``callback``; returns the rows read.
+
+        Every batch has :attr:`schema`, and holds the same number of rows bar the
+        last, which holds the remainder. A file with no rows calls back never and
+        returns ``0``.
+
+        Raise from ``callback`` to stop early: the parse is abandoned and the
+        exception comes back out of here. Reading twice reads the file twice.
+
+        Parameters
+        ----------
+        callback:
+            Called with each ``pyarrow.RecordBatch`` in turn. What it returns is
+            ignored; what it raises stops the read.
+        batch_rows:
+            Rows per batch. What a batch costs is rows times columns, so the
+            right number depends on how wide the file is: the default is modest
+            for a few dozen columns and far too much for a thousand.
+            ``len(reader.schema)`` is known by the time this is called, which is
+            why the choice lives here rather than on :func:`open_sav`.
+        """
+        if batch_rows <= 0:
+            raise ValueError(f"batch_rows must be positive, got {batch_rows}")
+        rows = 0
+
+        def on_batch(arrays: list[pa.Array], tags: list[pa.Array | None]) -> None:
+            nonlocal rows
+            batch = self._to_batch(arrays, tags)
+            rows += batch.num_rows
+            callback(batch)
+
+        # Left where it began, so reading again reads the same bytes.
+        with _rewound(self._file):
+            _parser.parse(
+                self._path,
+                self._file_format,
+                on_batch=on_batch,
+                batch_rows=batch_rows,
+                **self._parse_kwargs,
+            )
+        return rows
+
+    def read_all(self) -> pa.Table:
+        """The whole file as one table - what the matching ``read_*`` would give."""
+        batches: list[pa.RecordBatch] = []
+        self.read_batches(batches.append)
+        return pa.Table.from_batches(batches, self.schema)
+
+    def _to_batch(self, arrays: list[pa.Array], tags: list[pa.Array | None]) -> pa.RecordBatch:
+        """One batch's raw columns, converted exactly as :func:`_read_data` converts a table.
+
+        ``from_arrays`` against ``_read_schema`` is also the check that the
+        metadata pass and this one saw the same file: a file rewritten between
+        them fails here rather than quietly producing something else.
+        """
+        table = pa.Table.from_arrays(arrays, schema=self._read_schema)
+        table = _convert_dates(table, self.metadata, self._file_format)
+        if self._tagged:
+            table = _with_tag_structs(table, tags)
+        columns = [column.combine_chunks() for column in table.columns]
+        return pa.RecordBatch.from_arrays(columns, schema=self.schema)
+
+
+class SavStreamingReader(_StreamingReader):
+    """Reads an SPSS ``.sav`` file a batch at a time; see :func:`open_sav`."""
+
+    _file_format: FileFormat = "sav"
+
+
+class DtaStreamingReader(_StreamingReader):
+    """Reads a Stata ``.dta`` file a batch at a time; see :func:`open_dta`."""
+
+    _file_format: FileFormat = "dta"
+
+
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
+
+_READER_OF: dict[FileFormat, type[_StreamingReader]] = {
+    "sav": SavStreamingReader,
+    "dta": DtaStreamingReader,
+}
+
+
+def _open(
+    where: PathLike | t.IO[bytes],
+    file_format: FileFormat,
+    columns: Iterable[str] | None,
+    row_limit: int,
+    row_offset: int,
+    encoding: str | None,
+    scan_and_narrow_types: bool,
+    preserve_user_missing: bool,
+) -> _StreamingReader:
+    path, file = _source(where)
+    names = None if columns is None else list(columns)
+
+    with _rewound(file):
+        stored_schema, metadata, num_rows, messages = _metadata_pass(path, file, file_format, encoding)
+    _emit_warnings(messages)
+    metadata = _for_columns(metadata, names)
+
+    types = None
+    if scan_and_narrow_types:
+        # Another pass of its own: the types every batch is read into have to be
+        # settled before the first of them is.
+        types = _scanned_types(
+            path, file, file_format, columns, row_limit, row_offset, encoding, preserve_user_missing
+        )
+
+    read_schema = _selected_schema(stored_schema, names, types)
+    schema = _convert_date_types(read_schema, metadata, file_format)
+    tagged = preserve_user_missing and SUPPORTS_TAGGED_MISSING[file_format]
+    if tagged:
+        schema = _tag_struct_schema(schema)
+
+    return _READER_OF[file_format](
+        path,
+        file,
+        schema=schema,
+        read_schema=read_schema,
+        metadata=metadata,
+        num_rows=num_rows,
+        tagged=tagged,
+        parse_kwargs={
+            "file": file,
+            "columns": names,
+            "types": types,
+            "row_limit": row_limit,
+            "row_offset": row_offset,
+            "encoding": encoding,
+            "preserve_user_missing": preserve_user_missing,
+        },
+    )
+
+
+def _selected_schema(
+    stored: pa.Schema, columns: list[str] | None, types: dict[str, pa.DataType] | None
+) -> pa.Schema:
+    """The schema the parse will hand back: the file's variables, selected and retyped.
+
+    The other half of what :func:`_metadata_pass` cannot know - which variables
+    were asked for, and at which types - applied the way the variable callback
+    applies it, in file order. Only the types a scan settled on ever get here, so
+    there is nothing to validate that ``parse`` will not validate again.
+    """
+    fields = [field_ for field_ in stored if columns is None or field_.name in columns]
+    if types is not None:
+        fields = [field_.with_type(types.get(field_.name, field_.type)) for field_ in fields]
+    return pa.schema(fields)
+
+
+def _for_columns(metadata: Metadata, columns: list[str] | None) -> Metadata:
+    """Narrow ``metadata`` to ``columns``, as a read of only those columns reports it.
+
+    The metadata pass sees every variable; a read that skipped some declares
+    nothing about them. File-level fields stay as they are - including
+    ``multiple_response_sets``, which a filtered read does not trim either.
+    """
+    if columns is None:
+        return metadata
+    selected = frozenset(columns)
+    kept: dict[str, t.Any] = {
+        field_name: {name: value for name, value in getattr(metadata, field_name).items() if name in selected}
+        for field_name in PER_VARIABLE
+    }
+    return replace(metadata, **kept)
 
 
 def _read_data(
@@ -219,15 +546,37 @@ def _read_data(
 
 def _read_metadata(
     where: PathLike | t.IO[bytes], file_format: FileFormat, encoding: str | None
-) -> tuple[int | None, pa.Schema, Metadata]:
+) -> tuple[pa.Schema, int | None, Metadata]:
     path, file = _source(where)
-    _, _, schema, metadata, row_count, messages, _ = _parser.parse(
+    schema, metadata, num_rows, messages = _metadata_pass(path, file, file_format, encoding)
+    _emit_warnings(messages)
+    return _convert_date_types(schema, metadata, file_format), num_rows, metadata
+
+
+def _metadata_pass(
+    path: bytes | None, file: t.IO[bytes] | None, file_format: FileFormat, encoding: str | None
+) -> tuple[pa.Schema, Metadata, int | None, list[str]]:
+    """Returns the variables as the file stores them - before any column selection,
+    narrowing or date conversion - along with the metadata, the header's row
+    count, and ReadStat's messages for the caller to warn about at its own line.
+    """
+    _, _, schema, metadata, num_rows, messages, _ = _parser.parse(
         path, file_format, file=file, metadata_only=True, encoding=encoding
     )
-    _emit_warnings(messages)
-    metadata = _normalise_widths(metadata, file_format)
-    schema = _convert_date_types(schema, metadata, file_format)
-    return row_count, schema, metadata
+    return schema, _normalise_widths(metadata, file_format), num_rows, messages
+
+
+@contextlib.contextmanager
+def _rewound(file: t.IO[bytes] | None) -> Iterator[None]:
+    """Leave ``file`` where it was, so the pass that follows sees the same bytes.
+
+    A file object may well have started partway into a larger stream, so where it
+    began is not where rewinding it would put it. Nothing to do for a path.
+    """
+    start = file.tell() if file is not None else 0
+    yield
+    if file is not None:
+        file.seek(start)
 
 
 def _scanned_types(
@@ -247,26 +596,22 @@ def _scanned_types(
     does not depend on the width they were read at, and a narrower one is less to
     convert.
 
-    A file object is left where it began, so the read that follows sees the same
-    bytes - it may well have started partway into a larger stream. ReadStat's
-    recoverable-problem messages are dropped here rather than warned about: the
-    read parses the same file the same way and reports them itself, and one
-    warning per problem is enough.
+    ReadStat's recoverable-problem messages are dropped here rather than warned
+    about: the read parses the same file the same way and reports them itself,
+    and one warning per problem is enough.
     """
-    start = file.tell() if file is not None else 0
-    *_, summaries = _parser.parse(
-        path,
-        file_format,
-        file=file,
-        scan=True,
-        columns=None if columns is None else list(columns),
-        row_limit=row_limit,
-        row_offset=row_offset,
-        encoding=encoding,
-        preserve_user_missing=preserve_user_missing,
-    )
-    if file is not None:
-        file.seek(start)
+    with _rewound(file):
+        *_, summaries = _parser.parse(
+            path,
+            file_format,
+            file=file,
+            scan=True,
+            columns=None if columns is None else list(columns),
+            row_limit=row_limit,
+            row_offset=row_offset,
+            encoding=encoding,
+            preserve_user_missing=preserve_user_missing,
+        )
     narrowed = ((summary, _narrow_type(summary)) for summary in summaries)
     return {summary["name"]: narrow for summary, narrow in narrowed if narrow != summary["type"]}
 
@@ -346,10 +691,26 @@ def _with_tag_structs(table: pa.Table, tags: list[pa.Array | None]) -> pa.Table:
     return table
 
 
+def _tag_struct_schema(schema: pa.Schema) -> pa.Schema:
+    """The schema :func:`_with_tag_structs` produces, without any data to look at.
+
+    Every batch has to have the same type whether or not it happens to hold a
+    tagged missing, so this wraps what that function wraps - every column a Stata
+    numeric, which is every column that is not a string.
+    """
+    fields = [
+        field_
+        if pa.types.is_string(field_.type) or pa.types.is_large_string(field_.type)
+        else field_.with_type(pa.struct([("value", field_.type), ("tag", TAG_TYPE)]))
+        for field_ in schema
+    ]
+    return pa.schema(fields)
+
+
 def _emit_warnings(messages: list[str]) -> None:
     """Re-emit ReadStat's recoverable-problem messages as Python warnings at the caller's line."""
     for message in messages:
-        # stacklevel: _emit_warnings -> _read_data/_read_metadata -> read_* -> caller
+        # stacklevel: _emit_warnings -> _read_data/_read_metadata/_open -> read_*/open_* -> caller
         warnings.warn(message, ReadstatWarning, stacklevel=4)
 
 

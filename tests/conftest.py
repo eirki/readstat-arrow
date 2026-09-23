@@ -29,6 +29,10 @@ READER_FUNCS = {
     "sav": readstat_arrow.read_sav,
     "dta": readstat_arrow.read_dta,
 }
+OPEN_FUNCS = {
+    "sav": readstat_arrow.open_sav,
+    "dta": readstat_arrow.open_dta,
+}
 METADATA_READER_FUNCS = {
     "sav": readstat_arrow.read_sav_metadata,
     "dta": readstat_arrow.read_dta_metadata,

@@ -117,8 +117,8 @@ def test_row_limit_and_offset(fmt: FileFormat) -> None:
 
 def test_read_metadata_only(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    row_count, schema, _meta = read_metadata(SAMPLES[fmt])
-    assert row_count == 5
+    schema, num_rows, _meta = read_metadata(SAMPLES[fmt])
+    assert num_rows == 5
     assert schema.names == [
         "mychar",
         "mynum",
@@ -134,7 +134,7 @@ def test_metadata_schema_matches_a_full_read(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
     read = READER_FUNCS[fmt]
     table, _ = read(SAMPLES[fmt])
-    _, schema, _meta = read_metadata(SAMPLES[fmt])
+    schema, _num_rows, _meta = read_metadata(SAMPLES[fmt])
 
     assert schema == table.schema
 
@@ -165,8 +165,8 @@ def test_table_survives_ipc_roundtrip(fmt: FileFormat) -> None:
 
 def test_read_metadata_carries_the_value_labels(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
-    row_count, _schema, meta = read_metadata(SAMPLES[fmt])
-    assert row_count == 5
+    _schema, num_rows, meta = read_metadata(SAMPLES[fmt])
+    assert num_rows == 5
     assert meta.value_labels["mylabl"] == MYLABL_LABELS[fmt]
 
 
@@ -352,13 +352,13 @@ def test_sav_variable_without_a_display_format() -> None:
     blanked = data[: name_at - 8] + bytes(8) + data[name_at:]
 
     table, meta = readstat_arrow.read_sav(io.BytesIO(blanked))
-    row_count, schema, metadata_only = readstat_arrow.read_sav_metadata(io.BytesIO(blanked))
+    schema, num_rows, metadata_only = readstat_arrow.read_sav_metadata(io.BytesIO(blanked))
 
     assert "num" not in meta.formats  # the file declares none
     assert meta.storage_widths == {"num": 8}  # and no format to read a declared width out of
     assert table.schema.field("num").type == pa.float64()  # nothing says it is a date
     assert table.column("num").to_pylist() == [1.0, 2.0]
-    assert (row_count, schema, metadata_only) == (2, table.schema, meta)
+    assert (num_rows, schema, metadata_only) == (2, table.schema, meta)
 
 
 def test_sav_utf8_string_values() -> None:
@@ -414,7 +414,7 @@ def test_sav_missing_ranges_and_labelled_missing_values() -> None:
 
 
 def test_sav_multiple_response_sets() -> None:
-    _, _schema, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
+    _schema, _rows, meta = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
     assert meta.multiple_response_sets == [
         {
             "name": "categorical_array",
@@ -433,7 +433,7 @@ def test_sav_multiple_response_sets() -> None:
             "variables": ["bool1", "bool2", "bool3"],
         },
     ]
-    _, _schema, without = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    _schema, _rows, without = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
     assert without.multiple_response_sets == []
 
 

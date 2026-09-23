@@ -168,7 +168,7 @@ def test_writer_rejects_wrong_schema(fmt: FileFormat) -> None:
         writer.write_table(table)
 
 
-def test_writer_enforces_row_count(fmt: FileFormat) -> None:
+def test_writer_enforces_num_rows(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
     table, meta = _survey()
 
@@ -182,10 +182,10 @@ def test_writer_enforces_row_count(fmt: FileFormat) -> None:
         writer.close()
 
 
-def test_writer_rejects_a_negative_row_count(fmt: FileFormat) -> None:
+def test_writer_rejects_a_negative_num_rows(fmt: FileFormat) -> None:
     Writer = WRITER_CLASSES[fmt]
     table, _meta = _survey()
-    with pytest.raises(ValueError, match="row_count must be non-negative"):
+    with pytest.raises(ValueError, match="num_rows must be non-negative"):
         Writer(io.BytesIO(), table.schema, -1)
 
 
@@ -947,7 +947,7 @@ def test_sav_integer_columns_default_to_no_decimals() -> None:
 
     readstat_arrow.write_sav(out, table, meta)
     out.seek(0)
-    _row_count, _schema, back_meta = readstat_arrow.read_sav_metadata(out)
+    _schema, _num_rows, back_meta = readstat_arrow.read_sav_metadata(out)
 
     assert back_meta.formats == {
         "count": "F8.0",  # an integer column: no decimals

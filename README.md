@@ -43,8 +43,8 @@ table, meta = readstat_arrow.read_dta("survey.dta")
 
 ```
 
-Every `read_*` function returns the same pair: a `pyarrow.Table`,
-and a `Metadata` object.
+Every `read_*` function returns the same pair: a `pyarrow.Table`, and a
+`Metadata` object.
 
 `Metadata` is a set of mappings from variable name to one attribute —
 `variable_labels`, `value_labels`, `formats`, `storage_widths`,
@@ -121,7 +121,8 @@ readstat_arrow.write_dta("survey.dta", table, meta)
 ```
 
 ### Writing in batches
-To avoid holding an entire table in memory at once, it is possible to write files in batches
+To avoid holding an entire table in memory at once, it is possible to write
+files in batches
 
 
 ```python
@@ -218,19 +219,20 @@ Metadata(
 is an error — SPSS itself allows no more.
 
 
-### Read the metadata without the data
+### Reading the metadata without the data
 
-`read_sav_metadata` and `read_dta_metadata` stop before reading the actual data. What comes back is
-the row count, the schema a full read would have given, and the `Metadata` object.
+`read_sav_metadata` and `read_dta_metadata` stop before reading the actual data.
+What comes back is the schema a full read would have given, the row count, and
+the `Metadata` object.
 
 ```python
 import readstat_arrow
 
-row_count, schema, meta = readstat_arrow.read_dta_metadata("panel.dta")
+schema, num_rows, meta = readstat_arrow.read_dta_metadata("panel.dta")
 
-row_count  # -> 4_000_000, from the header
 schema.names  # -> ["id", "year", "income", ...], the variables in file order
 schema.field("income").type  # -> the type a full read would give that column
+num_rows  # -> 4_000_000, from the header
 meta.variable_labels["income"]  # -> "Annual income, NOK"
 ```
 
@@ -239,7 +241,7 @@ do, some non-SPSS writers of `.sav` do not. The schema describes a
 `preserve_user_missing=False` read, so it does not show the `struct<value, tag>`
 columns that option gives a `.dta`.
 
-### Read only part of a file
+### Reading only part of a file
 
 Use `columns`, `row_offset` and `row_limit` to read parts of a file:
 
@@ -257,14 +259,14 @@ table, meta = readstat_arrow.read_dta(
 `row_limit=0` means no limit, and the returned `Metadata` covers the columns
 that were read, not the whole file.
 
-### Read a big file in less memory
+### Narrowing types to reduce memory usage
 
-Where memory is the constraint, holding the whole table in it is the expensive
-part of reading a file — and the type a column is stored as is often wider than
-its values need. A `.sav` is the worst of it: every numeric column is a 64-bit
-double whatever it holds, so a survey of one-digit codes costs 8 bytes a cell. A
-`.dta` has narrow types of its own — `byte`, `int`, `long`, `float` — but a
-variable is only as narrow as whoever wrote the file declared it.
+In memory-constrained environments, it can be difficult to hold the whole table in
+memory at once — especially since the type a column is stored as is often wider
+than its values need. A `.sav` is the worst of it: every numeric column is a
+64-bit double whatever it holds, so a even survey of one-digit codes costs 8 bytes a
+cell. A `.dta` has narrow types of its own — `byte`, `int`, `long`, `float` —
+but a variable is only as narrow as whoever wrote the file declared it.
 
 `scan_and_narrow_types=True` reads each column at the width its values actually
 need instead:
@@ -285,6 +287,118 @@ every value was a whole number, `float32` when every value round-trips through
 it, else `float64`. The ladder is `int8`, `int16`, `int32`, `float32`,
 `float64`. Strings are untouched.
 
+### Reading in batches
+
+Read a fixed number of rows at a time and hand each one over as a
+`pyarrow.RecordBatch`,
+
+```python
+import pyarrow.parquet as pq
+import readstat_arrow
+
+reader = readstat_arrow.open_sav("big.sav")
+with pq.ParquetWriter("big.parquet", reader.schema) as writer:
+    reader.read_batches(writer.write_batch)
+```
+
+`open_sav` and `open_dta` return a `SavStreamingReader` / `DtaStreamingReader`.
+Opening reads the metadata and nothing else, so `schema`, `num_rows` and
+`metadata` are all there before the data itself is read:
+
+```python
+reader = readstat_arrow.open_sav("panel.sav")
+reader.schema  # the schema every batch has
+reader.num_rows  # rows the header declares, or None
+reader.metadata.variable_labels["income"]
+```
+
+`read_batches(callback)` then reads the file, calling `callback` with each batch
+and returning the rows read.
+
+The writers in `readstat-arrow` take a batch at a time too, so converting between the two
+formats can be done on the fly:
+
+```python
+reader = readstat_arrow.open_sav("panel.sav")
+with readstat_arrow.DtaWriter(
+    "survey.dta", reader.schema, reader.num_rows, reader.metadata
+) as writer:
+    reader.read_batches(writer.write_batch)
+```
+
+A reader takes the same arguments the matching `read_*` takes: `columns`,
+`row_offset`, `row_limit`, `encoding`, `preserve_user_missing`, and
+`scan_and_narrow_types`.
+
+### Making a `pyarrow.RecordBatchReader`
+
+`read_batches` pushes: it drives the parse and calls you. Some consumers want to
+pull instead — DuckDB, `pyarrow.dataset.write_dataset`, anything that takes a
+`pyarrow.RecordBatchReader`. Turning one around into the other needs a thread,
+and can be done like this:
+
+```python
+import queue
+import threading
+
+import pyarrow as pa
+
+
+def record_batch_reader(reader, *, batch_rows=65_536, ahead=2):
+    """A pyarrow.RecordBatchReader over a readstat-arrow streaming reader."""
+    queued: queue.Queue = queue.Queue(maxsize=ahead)
+    done = object()
+
+    def run():
+        try:
+            reader.read_batches(queued.put, batch_rows=batch_rows)
+        except BaseException as exc:  # comes back out of the consumer
+            queued.put(exc)
+        else:
+            queued.put(done)
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def batches():
+        while True:
+            item = queued.get()
+            if item is done:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    return pa.RecordBatchReader.from_batches(reader.schema, batches())
+```
+
+`maxsize` is the backpressure: the parse runs at most `ahead` batches in front
+of whoever is reading and then waits, so the file is never held. What comes back
+is an ordinary `pyarrow.RecordBatchReader`, which DuckDB will query in place:
+
+```python
+import duckdb
+import readstat_arrow
+
+survey = record_batch_reader(readstat_arrow.open_sav("big.sav"))
+duckdb.sql("select region, avg(income) from survey group by region").show()
+```
+
+or `pyarrow.dataset` will write out partitioned:
+
+```python
+import pyarrow.dataset as ds
+
+ds.write_dataset(
+    record_batch_reader(readstat_arrow.open_dta("panel.dta")),
+    "panel/",
+    format="parquet",
+)
+```
+
+One thing to know: a consumer that stops reading part way leaves the worker
+thread parked on a full queue until the process ends. Read it to the end, or add
+a flag the callback checks if that matters.
+
 ### Read from something other than a path
 
 Every `read_*` function also takes a binary file object, so a file that arrives
@@ -303,7 +417,7 @@ table, meta = readstat_arrow.read_sav(io.BytesIO(downloaded))
 
 # an open file works too, and is left open where reading stopped
 with open("survey.sav", "rb") as file:
-    row_count, schema, meta = readstat_arrow.read_sav_metadata(file)
+    schema, num_rows, meta = readstat_arrow.read_sav_metadata(file)
 ```
 
 The file object must be seekable, and is read from wherever it currently is - so
@@ -328,9 +442,10 @@ uv run pre-commit install    # optional: run those same checks on every commit
 system, which mypy cannot follow, and Cython checks them at compile time.
 
 ReadStat is vendored as a git submodule at `vendor/ReadStat`; bump it with `git
-submodule update --remote vendor/ReadStat`. `uv sync` rebuilds the extension
-whenever `_cython/`, `setup.py` or the ReadStat sources change (see `[tool.uv]
-cache-keys` in `pyproject.toml`).
+submodule update --remote vendor/ReadStat`.
+
+`uv sync` rebuilds the extension whenever `_cython/`, `setup.py` or the ReadStat
+sources change (see `[tool.uv] cache-keys` in `pyproject.toml`).
 
 ## Layout
 
@@ -340,7 +455,7 @@ setup.py                  Cython extension definition (compiles ReadStat in)
 vendor/ReadStat/          git submodule
 src/readstat_arrow/
   __init__.py             public API re-exports
-  reader.py               read_* and read_*_metadata functions, table assembly, type narrowing
+  reader.py               read_*, read_*_metadata, open_* (streaming), table assembly, type narrowing
   writer.py               SavWriter / DtaWriter, write_* functions, type planning
   metadata.py             the Metadata dataclass and its per-variable mappings
   errors.py               ReadstatError, ReadstatWarning

@@ -300,14 +300,14 @@ class Writer:
     ``columns`` and ``label_sets`` are the plan produced by
     :mod:`readstat_arrow.writer` (see there for the dict keys). ``write`` may be
     called repeatedly with one array per column; ``close`` finishes the file
-    and verifies that exactly ``row_count`` rows were written.
+    and verifies that exactly ``num_rows`` rows were written.
     """
 
     _writer: cython.pointer(readstat_writer_t)
     _sink: _Sink
     _columns: list  # list[_Column]
     _rows_written: cython.Py_ssize_t
-    _row_count: cython.Py_ssize_t
+    _num_rows: cython.Py_ssize_t
     _closed: cython.bint
     # ReadStat stores the `const char *` of a missing string value without copying
     # it (readstat_variable.c: make_string_value), and reads it back when it emits
@@ -318,7 +318,7 @@ class Writer:
         self,
         file: object,
         file_format: FileFormat,
-        row_count: int,
+        num_rows: int,
         columns: list,
         label_sets: list,
         file_label: str | None,
@@ -327,7 +327,7 @@ class Writer:
         self._writer = cython.NULL
         self._columns = []
         self._rows_written = 0
-        self._row_count = row_count
+        self._num_rows = num_rows
         self._closed = False
         self._missing_strings = []
         self._sink = _Sink(file)
@@ -405,9 +405,9 @@ class Writer:
 
         vctx: cython.p_void = cython.cast(cython.p_void, self._sink)
         if file_format == "sav":
-            rc = readstat_begin_writing_sav(w, vctx, row_count)
+            rc = readstat_begin_writing_sav(w, vctx, num_rows)
         elif file_format == "dta":
-            rc = readstat_begin_writing_dta(w, vctx, row_count)
+            rc = readstat_begin_writing_dta(w, vctx, num_rows)
         else:
             t.assert_never(file_format)
         self._raise_sink_error()
@@ -444,9 +444,9 @@ class Writer:
         if len(arrays) != n_cols:
             raise ValueError(f"expected {n_cols} arrays, got {len(arrays)}")
         n_rows: cython.Py_ssize_t = len(arrays[0]) if n_cols else 0
-        if self._rows_written + n_rows > self._row_count:
+        if self._rows_written + n_rows > self._num_rows:
             raise ReadstatError(
-                f"writer was created for {self._row_count} rows; "
+                f"writer was created for {self._num_rows} rows; "
                 f"writing {n_rows} more after {self._rows_written} would exceed that"
             )
 
@@ -510,7 +510,7 @@ class Writer:
         rc: readstat_error_t = readstat_end_writing(self._writer)
         self._raise_sink_error()
         if rc != READSTAT_OK:
-            _check(rc, f"{self._rows_written} of {self._row_count} rows written")
+            _check(rc, f"{self._rows_written} of {self._num_rows} rows written")
 
     @property
     def rows_written(self) -> int:

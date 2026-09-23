@@ -108,16 +108,16 @@ class _Writer:
         self,
         where: PathLike | t.IO[bytes],
         schema: pa.Schema,
-        row_count: int,
+        num_rows: int,
         metadata: Metadata | None = None,
         variable_ranges: Mapping[str, tuple[int, int]] | None = None,
         rename_invalid_names: bool = False,
     ) -> None:
-        if row_count < 0:
-            raise ValueError("row_count must be non-negative")
+        if num_rows < 0:
+            raise ValueError("num_rows must be non-negative")
         metadata = metadata if metadata is not None else Metadata()
         self.schema = schema  # what write_batch checks against: the caller's own names
-        self.row_count = row_count
+        self.num_rows = num_rows
 
         written = schema
         self.renamed_variables: dict[str, str] = {}
@@ -150,7 +150,7 @@ class _Writer:
             self._impl = _writer.Writer(
                 self._file,
                 self._file_format,
-                row_count,
+                num_rows,
                 [p.as_spec(self._label_set_names.get(p.name)) for p in self._plans],
                 label_sets,
                 file_label,
@@ -186,7 +186,7 @@ class _Writer:
     # -- lifecycle -------------------------------------------------------------
 
     def close(self) -> None:
-        """Finish the file. Raises :class:`ReadstatError` if fewer rows than ``row_count`` were written."""
+        """Finish the file. Raises :class:`ReadstatError` if fewer rows than ``num_rows`` were written."""
         if self._closed:
             return
         self._closed = True
@@ -222,7 +222,7 @@ class SavWriter(_Writer):
         Output path or a binary file object.
     schema:
         Arrow schema of the tables/batches that will be written.
-    row_count:
+    num_rows:
         Total number of rows that will be written; SPSS stores it in the header.
     metadata:
         Optional variable labels, formats, value labels, missing values, file
@@ -251,12 +251,12 @@ class SavWriter(_Writer):
         self,
         where: PathLike | t.IO[bytes],
         schema: pa.Schema,
-        row_count: int,
+        num_rows: int,
         metadata: Metadata | None = None,
         *,
         rename_invalid_names: bool = False,
     ) -> None:
-        super().__init__(where, schema, row_count, metadata, rename_invalid_names=rename_invalid_names)
+        super().__init__(where, schema, num_rows, metadata, rename_invalid_names=rename_invalid_names)
 
 
 class DtaWriter(_Writer):
@@ -264,7 +264,7 @@ class DtaWriter(_Writer):
 
     Parameters
     ----------
-    where, schema, row_count, metadata, rename_invalid_names:
+    where, schema, num_rows, metadata, rename_invalid_names:
         As for :class:`SavWriter`; the default string width is 244, and Stata's
         naming rules are the stricter pair - letters, digits and ``_`` only, 32
         characters, and its own list of reserved words.
@@ -290,13 +290,13 @@ class DtaWriter(_Writer):
         self,
         where: PathLike | t.IO[bytes],
         schema: pa.Schema,
-        row_count: int,
+        num_rows: int,
         metadata: Metadata | None = None,
         *,
         variable_ranges: Mapping[str, tuple[int, int]] | None = None,
         rename_invalid_names: bool = False,
     ) -> None:
-        super().__init__(where, schema, row_count, metadata, variable_ranges, rename_invalid_names)
+        super().__init__(where, schema, num_rows, metadata, variable_ranges, rename_invalid_names)
 
 
 def write_sav(
