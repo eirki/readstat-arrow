@@ -19,14 +19,19 @@ import pytest
 
 import readstat_arrow
 from conftest import READER_FUNCS, WRITER_CLASSES, WRITER_FUNCS
-from readstat_arrow import Code, Metadata, Missingness
+from readstat_arrow import Code, DtaWriter, Metadata, Missingness
 from readstat_arrow._formats import FileFormat
 
 SEX_LABELS: list[Code] = [{"value": 1.0, "label": "Male"}, {"value": 2.0, "label": "Female"}]
 
 MAGIC: dict[FileFormat, bytes] = {"sav": b"$FL2", "dta": b"<sta"}  # the first bytes of a finished file
-# Variable, value and file label limits, in UTF-8 bytes.
-LABEL_LIMITS: dict[FileFormat, tuple[int, int, int]] = {"sav": (256, 120, 64), "dta": (320, 32_000, 256)}
+# Variable, value and file label limits, as (UTF-8 bytes, characters); None means
+# the format caps only the byte length. Stata 118 caps labels at 80 characters too.
+LabelLimit = tuple[int, int | None]
+LABEL_LIMITS: dict[FileFormat, tuple[LabelLimit, LabelLimit, LabelLimit]] = {
+    "sav": ((256, None), (120, None), (64, None)),
+    "dta": ((320, 80), (32_000, None), (256, 80)),
+}
 
 
 def _survey() -> tuple[pa.Table, Metadata]:
@@ -522,7 +527,7 @@ def test_long_labels_are_truncated_on_character_boundaries(fmt: FileFormat) -> N
     out = io.BytesIO()
 
     with pytest.warns(readstat_arrow.ReadstatWarning, match="truncated"):
-        write(out, table, metadata)
+        write(out, table, metadata, on_text_limits_exceeded="truncate")
     out.seek(0)
     _, back = read(out)
 
@@ -534,14 +539,19 @@ def test_long_labels_are_truncated_on_character_boundaries(fmt: FileFormat) -> N
     _assert_fitted(back.file_label, long_file_label, file_limit)
 
 
-def _assert_fitted(actual: str | None, original: str, limit: int) -> None:
-    """``actual`` is the longest whole-character prefix of ``original`` within ``limit`` bytes."""
+def _assert_fitted(actual: str | None, original: str, limit: LabelLimit) -> None:
+    """``actual`` is the longest whole-character prefix of ``original`` that fits within ``limit``."""
+    max_bytes, max_chars = limit
     assert actual is not None
     assert original.startswith(actual)
-    assert len(actual.encode()) <= limit
-    if actual != original:
+    assert len(actual.encode()) <= max_bytes
+    if max_chars is not None:
+        assert len(actual) <= max_chars
+    if actual != original:  # nothing more would have fit
         next_char = original[len(actual)]
-        assert len(actual.encode()) + len(next_char.encode()) > limit  # nothing more would have fit
+        over_bytes = len(actual.encode()) + len(next_char.encode()) > max_bytes
+        over_chars = max_chars is not None and len(actual) + 1 > max_chars
+        assert over_bytes or over_chars
 
 
 UNTOUCHED_CODES: dict[FileFormat, list[Code]] = {
@@ -551,14 +561,14 @@ UNTOUCHED_CODES: dict[FileFormat, list[Code]] = {
 
 
 def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
-    """Labels sized to SPSS's limits, which are the smaller pair, so neither format cuts them."""
+    """Labels sized to whichever format is stricter per field, so neither format cuts them."""
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
-    codes: list[Code] = [{"value": 1, "label": "€" * 40}]  # exactly 120 bytes
+    codes: list[Code] = [{"value": 1, "label": "€" * 40}]  # exactly 120 bytes, SPSS's limit
     metadata = Metadata(
-        variable_labels={"v": "ø" * 128},  # exactly 256 bytes
+        variable_labels={"v": "ø" * 80},  # exactly 80 characters, Stata 118's limit
         value_labels={"v": codes},
-        file_label="x" * 64,
+        file_label="x" * 64,  # exactly 64 bytes, SPSS's limit
     )
     table = pa.table({"v": pa.array([1.0])})
     out = io.BytesIO()
@@ -569,9 +579,127 @@ def test_labels_within_limits_are_untouched(fmt: FileFormat) -> None:
     out.seek(0)
     _, back = read(out)
 
-    assert back.variable_labels["v"] == "ø" * 128
+    assert back.variable_labels["v"] == "ø" * 80
     assert back.value_labels["v"] == UNTOUCHED_CODES[fmt]
     assert back.file_label == "x" * 64
+
+
+def test_overlong_text_is_an_error_by_default(fmt: FileFormat) -> None:
+    """Nothing is cut behind the caller's back: the default policy refuses to write."""
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"v": pa.array([1.0])})
+    metadata = Metadata(variable_labels={"v": "x" * 400})
+
+    with pytest.raises(ValueError, match="variable label of v"):
+        write(io.BytesIO(), table, metadata)
+
+
+def test_the_error_names_the_limit_and_the_way_out(fmt: FileFormat) -> None:
+    """The message has to be enough to act on without reading the docs."""
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"v": pa.array([1.0])})
+    metadata = Metadata(file_label="x" * 400)
+
+    with pytest.raises(ValueError, match=r"file label of file is 400 bytes and 400 characters"):
+        write(io.BytesIO(), table, metadata)
+    with pytest.raises(ValueError, match=r"Pass on_text_limits_exceeded='truncate'"):
+        write(io.BytesIO(), table, metadata)
+
+
+def test_writers_reject_an_unknown_on_text_limits_exceeded(fmt: FileFormat) -> None:
+    Writer = WRITER_CLASSES[fmt]
+    schema = pa.schema([pa.field("v", pa.float64())])
+
+    with pytest.raises(ValueError, match="on_text_limits_exceeded must be 'error' or 'truncate'"):
+        Writer(io.BytesIO(), schema, 1, on_text_limits_exceeded="cut")
+
+
+def test_sav_notes_are_one_80_byte_line() -> None:
+    """An SPSS note is a single document-record line, which is 80 bytes wide."""
+    table = pa.table({"v": pa.array([1.0])})
+    out = io.BytesIO()
+
+    readstat_arrow.write_sav(out, table, Metadata(notes=["n" * 80]))
+    out.seek(0)
+    _, back = readstat_arrow.read_sav(out)
+    assert back.notes == ["n" * 80]
+
+    with pytest.raises(ValueError, match="note of note 0 is 81 bytes"):
+        readstat_arrow.write_sav(io.BytesIO(), table, Metadata(notes=["n" * 81]))
+
+
+def test_dta_notes_run_to_67784_bytes() -> None:
+    table = pa.table({"v": pa.array([1.0])})
+    out = io.BytesIO()
+
+    readstat_arrow.write_dta(out, table, Metadata(notes=["n" * 67_784]))
+    out.seek(0)
+    _, back = readstat_arrow.read_dta(out)
+    assert back.notes == ["n" * 67_784]
+
+    with pytest.raises(ValueError, match="note of note 0 is 67785 bytes"):
+        readstat_arrow.write_dta(io.BytesIO(), table, Metadata(notes=["n" * 67_785]))
+
+
+def test_truncating_a_note_keeps_its_first_bytes(fmt: FileFormat) -> None:
+    read = READER_FUNCS[fmt]
+    write = WRITER_FUNCS[fmt]
+    table = pa.table({"v": pa.array([1.0])})
+    out = io.BytesIO()
+
+    with pytest.warns(readstat_arrow.ReadstatWarning, match="note of note 0"):
+        write(out, table, Metadata(notes=["n" * 80_000]), on_text_limits_exceeded="truncate")
+    out.seek(0)
+    _, back = read(out)
+
+    assert back.notes == [NOTE_KEPT[fmt]]
+
+
+NOTE_KEPT: dict[FileFormat, str] = {"sav": "n" * 80, "dta": "n" * 67_784}
+
+
+def test_truncating_string_values_cuts_on_a_character_boundary() -> None:
+    """2045 is not a multiple of 3, so a naive cut would leave a third of a 日."""
+    out = io.BytesIO()
+
+    with pytest.warns(readstat_arrow.ReadstatWarning):  # the width and the values are both warned about
+        readstat_arrow.write_dta(
+            out, pa.table({"s": pa.array(["日" * 1000])}), on_text_limits_exceeded="truncate"
+        )
+    out.seek(0)
+    back, _ = readstat_arrow.read_dta(out)
+
+    assert back.column("s")[0].as_py() == "日" * 681  # 2043 bytes; a 682nd would need 2046
+
+
+def test_truncating_only_touches_the_values_that_do_not_fit() -> None:
+    out = io.BytesIO()
+
+    with pytest.warns(readstat_arrow.ReadstatWarning):
+        readstat_arrow.write_dta(
+            out, pa.table({"s": pa.array(["short", None, "x" * 3000])}), on_text_limits_exceeded="truncate"
+        )
+    out.seek(0)
+    back, _ = readstat_arrow.read_dta(out)
+
+    assert back.column("s").to_pylist() == ["short", "", "x" * 2045]  # Stata has no missing string
+
+
+def test_truncating_cuts_values_to_a_declared_width() -> None:
+    """The incremental writer is told the width, so the values are brought down to it."""
+    table = pa.table({"s": pa.array(["abcdefgh"], pa.large_string())})
+    narrow = Metadata(storage_widths={"s": 5})
+    out = io.BytesIO()
+
+    with (
+        pytest.warns(readstat_arrow.ReadstatWarning, match="values longer than 5 bytes truncated"),
+        DtaWriter(out, table.schema, 1, narrow, on_text_limits_exceeded="truncate") as writer,
+    ):
+        writer.write_table(table)
+    out.seek(0)
+    back, _ = readstat_arrow.read_dta(out)
+
+    assert back.column("s")[0].as_py() == "abcde"
 
 
 # Tests of one format alone: a file, a record or a rule the other format has no equivalent of.
@@ -886,6 +1014,61 @@ def test_dta_value_label_keys_stop_where_a_long_does() -> None:
         bad = Metadata(value_labels={"v": [{"value": key, "label": "nope"}]})
         with pytest.raises(ValueError, match=r"'v'.*only label values a long can hold"):
             readstat_arrow.write_dta(io.BytesIO(), table, bad)
+
+
+def test_dta_rejects_a_value_labelled_twice() -> None:
+    """Stata finds a label by binary search, so one key may carry only one label."""
+    table = pa.table({"v": pa.array([1.0])})
+    twice = Metadata(value_labels={"v": [{"value": 1, "label": "One"}, {"value": 1, "label": "Uno"}]})
+
+    with pytest.raises(ValueError, match=r"'v'.*cannot label value 1 more than once"):
+        readstat_arrow.write_dta(io.BytesIO(), table, twice)
+
+
+def test_dta_rejects_keys_that_collide_once_narrowed() -> None:
+    """1 and 1.0 are distinct codes in the metadata but the same int32 key in the file."""
+    table = pa.table({"v": pa.array([1.0])})
+    colliding = Metadata(value_labels={"v": [{"value": 1, "label": "One"}, {"value": 1.0, "label": "Uno"}]})
+
+    with pytest.raises(ValueError, match=r"'v'.*cannot label value 1 more than once"):
+        readstat_arrow.write_dta(io.BytesIO(), table, colliding)
+
+
+def test_dta_rejects_a_tag_used_twice() -> None:
+    table = pa.table({"v": pa.array([1.0])})
+    twice = Metadata(
+        value_labels={"v": [{"value": "a", "label": "Refused"}, {"value": "a", "label": "Again"}]}
+    )
+
+    with pytest.raises(ValueError, match=r"'v'.*cannot label value 'a' more than once"):
+        readstat_arrow.write_dta(io.BytesIO(), table, twice)
+
+
+def test_dta_string_columns_stop_at_2045_bytes() -> None:
+    """Stata's str# types end there; longer text would need strL, which is not written."""
+    readstat_arrow.write_dta(io.BytesIO(), pa.table({"s": pa.array(["x" * 2045])}))
+
+    with pytest.raises(ValueError, match=r"'s' needs 3000 bytes; Stata strings stop at 2045"):
+        readstat_arrow.write_dta(io.BytesIO(), pa.table({"s": pa.array(["x" * 3000])}))
+
+
+def test_dta_rejects_a_declared_width_past_2045() -> None:
+    """The incremental writer honours the declared width, so it is checked there too."""
+    table = pa.table({"s": pa.array(["a"], pa.large_string())})
+    wide = Metadata(storage_widths={"s": 2046})
+
+    with pytest.raises(ValueError, match=r"'s' needs 2046 bytes; Stata strings stop at 2045"):
+        DtaWriter(io.BytesIO(), table.schema, 1, wide)
+
+
+def test_sav_string_columns_have_no_width_ceiling() -> None:
+    """SPSS segments a long string across records, so 3000 bytes round-trips whole."""
+    out = io.BytesIO()
+    readstat_arrow.write_sav(out, pa.table({"s": pa.array(["x" * 3000])}))
+    out.seek(0)
+    back, _ = readstat_arrow.read_sav(out)
+
+    assert back.column("s")[0].as_py() == "x" * 3000
 
 
 def test_sav_rejects_tag_structs_and_dta_rejects_string_ones() -> None:

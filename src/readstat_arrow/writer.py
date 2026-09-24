@@ -12,10 +12,35 @@ are written with their Arrow names and nothing else declared.
 The row count must be known up front because both file formats store it in the
 header, which ReadStat writes before the first row.
 
-Things the formats cannot represent, and what happens to them: null strings are
-written as empty strings (neither SPSS nor Stata has a missing string); NaN in a
-float column is written as system-missing; a timezone on a timestamp is dropped
-after converting to UTC; value-label set names are not stored
+Null strings are written as empty strings (neither SPSS nor Stata has a missing
+string); NaN in a float column is written as system-missing; a timezone on a
+timestamp is dropped after converting to UTC; value-label set names are not
+stored
+
+Text limits
+-----------
+Both formats cap how much text a field can hold, and the caps differ. Every
+writer takes ``on_text_limits_exceeded`` to choose between refusing to write and
+cutting the text; each one documents its own format's numbers, and they are:
+
+==============  =========================  =========================
+field           ``.sav``                   ``.dta`` (format 118)
+==============  =========================  =========================
+variable label  256 bytes                  320 bytes, 80 characters
+value label     120 bytes                  32 000 bytes
+file label      64 bytes                   256 bytes, 80 characters
+note            80 bytes (one per note)    67 784 bytes
+string value    32 767 bytes               2 045 bytes
+==============  =========================  =========================
+
+Where a format states both a byte and a character cap, text has to be within
+each of them. Both string ceilings are the format's own: SPSS records a width
+wider than 32 767 in a way it cannot read back, and Stata's ``str#`` types stop
+at 2 045, longer text needing ``strL``, which this writer does not emit.
+
+Variable names have limits too, but a rule of their own -
+``rename_invalid_names`` - because a name cannot simply be cut without risking a
+collision with another column.
 """
 
 from __future__ import annotations
@@ -25,7 +50,7 @@ import re
 import typing as t
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import TracebackType
 
 import pyarrow as pa
@@ -44,7 +69,7 @@ from readstat_arrow._formats import (
 from readstat_arrow.errors import ReadstatWarning
 from readstat_arrow.metadata import Metadata, Missingness, Value
 
-__all__ = ["DtaWriter", "SavWriter", "write_dta", "write_sav"]
+__all__ = ["DtaWriter", "SavWriter", "TextLimitPolicy", "write_dta", "write_sav"]
 
 PathLike = str | os.PathLike[str]
 
@@ -61,15 +86,54 @@ _KIND_TYPE = {
 _MEASURE = {"unknown": 0, "nominal": 1, "ordinal": 2, "scale": 3}
 _ALIGNMENT = {"unknown": 0, "left": 1, "center": 2, "right": 3}
 
-# Maximum length, in UTF-8 bytes, of the free-text fields each format can store.
-# Longer text is truncated at a character boundary (ReadStat itself would cut
-# mid-character) and a ReadstatWarning is emitted.
-_TEXT_LIMITS: FormatMap[dict[str, int]] = {
-    "sav": {"variable label": 256, "value label": 120, "file label": 64},
-    # Stata 118 allows 320 bytes for the dataset label too, but ReadStat's writer holds
-    # it in a 256-byte buffer, so that is the effective limit.
-    "dta": {"variable label": 320, "value label": 32_000, "file label": 256},
+
+@dataclass(frozen=True)
+class _Limit:
+    """The most one field can hold, in UTF-8 bytes and - where a format counts them - characters."""
+
+    max_bytes: int
+    max_chars: int | None = None
+
+    def exceeded_by(self, text: str) -> bool:
+        return len(text.encode("utf-8")) > self.max_bytes or (
+            self.max_chars is not None and len(text) > self.max_chars
+        )
+
+    def __str__(self) -> str:
+        if self.max_chars is None:
+            return f"{self.max_bytes} bytes"
+        return f"{self.max_bytes} bytes and {self.max_chars} characters"
+
+
+# How much each format can store in the fields that have a maximum. ``on_text_limits_exceeded``
+# decides what happens to anything longer.
+
+# Notes on the less obvious numbers. Stata 118 holds labels as UTF-8 in a 321-byte
+# field but also refuses more than 80 characters, so both bounds bind; its dataset
+# label is capped at 256 bytes on top of that, because ReadStat's writer holds it
+# in a 257-byte buffer. An SPSS note is one 80-byte document line. SPSS's own
+# ceiling for a string variable is 32_767 bytes - ReadStat will write a wider one,
+# but it records the width as five decimal digits modulo 100_000, so the file it
+# produces is not one SPSS can read back.
+_LIMITS: FormatMap[dict[str, _Limit]] = {
+    "sav": {
+        "variable label": _Limit(256),
+        "value label": _Limit(120),
+        "file label": _Limit(64),
+        "note": _Limit(80),
+        "string value": _Limit(32_767),
+    },
+    "dta": {
+        "variable label": _Limit(320, 80),
+        "value label": _Limit(32_000),
+        "file label": _Limit(256, 80),
+        "note": _Limit(67_784),
+        "string value": _Limit(2_045),
+    },
 }
+
+# What a writer does with text or a string column that is over the limit.
+TextLimitPolicy = t.Literal["error", "truncate"]
 
 # Stata keys value labels with an int32, whatever the labelled variable's type,
 # and reserves the top of that range for missing values - so the keys it can
@@ -112,9 +176,15 @@ class _Writer:
         metadata: Metadata | None = None,
         variable_ranges: Mapping[str, tuple[int, int]] | None = None,
         rename_invalid_names: bool = False,
+        on_text_limits_exceeded: TextLimitPolicy = "error",
     ) -> None:
         if num_rows < 0:
             raise ValueError("num_rows must be non-negative")
+        if on_text_limits_exceeded not in ("error", "truncate"):
+            raise ValueError(
+                f"on_text_limits_exceeded must be 'error' or 'truncate', got {on_text_limits_exceeded!r}"
+            )
+        self.on_text_limits_exceeded = on_text_limits_exceeded
         metadata = metadata if metadata is not None else Metadata()
         self.schema = schema  # what write_batch checks against: the caller's own names
         self.num_rows = num_rows
@@ -132,11 +202,35 @@ class _Writer:
 
         ranges = variable_ranges or {}
         self._plans = [
-            _ColumnPlan.build(field, metadata, self._file_format, ranges.get(original))
+            _ColumnPlan.build(
+                field, metadata, self._file_format, ranges.get(original), on_text_limits_exceeded
+            )
             for original, field in zip(schema.names, written, strict=True)
         ]
-        label_sets, self._label_set_names = _plan_label_sets(self._plans, self._file_format)
-        file_label = _fit(metadata.file_label, self._file_format, "file label", "file")
+        label_sets, self._label_set_names = _plan_label_sets(
+            self._plans, self._file_format, on_text_limits_exceeded
+        )
+        # _fit -> _Writer.__init__ -> SavWriter/DtaWriter -> caller
+        file_label = _fit(
+            text=metadata.file_label,
+            file_format=self._file_format,
+            field="file label",
+            owner="file",
+            on_text_limits_exceeded=on_text_limits_exceeded,
+            stacklevel=4,
+        )
+        notes = [
+            _fit(
+                text=note,
+                file_format=self._file_format,
+                field="note",
+                owner=f"note {i}",
+                on_text_limits_exceeded=on_text_limits_exceeded,
+                stacklevel=4,
+            )
+            or ""
+            for i, note in enumerate(metadata.notes)
+        ]
 
         if isinstance(where, str | os.PathLike):
             path = os.fspath(where)
@@ -154,7 +248,7 @@ class _Writer:
                 [p.as_spec(self._label_set_names.get(p.name)) for p in self._plans],
                 label_sets,
                 file_label,
-                list(metadata.notes),
+                notes,
             )
         except BaseException:  # pragma: no cover
             if self._owns_file:
@@ -236,10 +330,19 @@ class SavWriter(_Writer):
         results are made unique. Off by default: an illegal name is an error when
         ReadStat writes the header. The renames are warned about and left on
         :attr:`renamed_variables`; metadata entries follow their variable.
+    on_text_limits_exceeded:
+        What to do with text SPSS cannot hold. ``"error"``, the default, raises
+        :class:`ValueError` naming the field and the limit; ``"truncate"`` cuts
+        to the longest prefix that fits, never splitting a multibyte character,
+        and warns with :class:`~readstat_arrow.ReadstatWarning`. What SPSS holds:
+        256 bytes of variable label, 120 of value label, 64 of file label, 80 per
+        note, and 32 767 in a string value. The module docstring has the same for
+        Stata, and why each number is what it is.
 
     A string variable is written ``storage_width`` bytes wide, or 255 when the
-    variable does not say; a longer value raises :class:`ReadstatError`. Use
-    :func:`write_sav` instead to size the columns from the data.
+    variable does not say. A value longer than its column's width raises
+    :class:`ReadstatError`, or is cut under ``on_text_limits_exceeded="truncate"``.
+    Use :func:`write_sav` instead to size the columns from the data.
 
     All numeric Arrow types are written as SPSS doubles; dates, timestamps and
     times become SPSS date/datetime/time variables (see :mod:`readstat_arrow._dates`).
@@ -255,8 +358,16 @@ class SavWriter(_Writer):
         metadata: Metadata | None = None,
         *,
         rename_invalid_names: bool = False,
+        on_text_limits_exceeded: TextLimitPolicy = "error",
     ) -> None:
-        super().__init__(where, schema, num_rows, metadata, rename_invalid_names=rename_invalid_names)
+        super().__init__(
+            where,
+            schema,
+            num_rows,
+            metadata,
+            rename_invalid_names=rename_invalid_names,
+            on_text_limits_exceeded=on_text_limits_exceeded,
+        )
 
 
 class DtaWriter(_Writer):
@@ -264,10 +375,17 @@ class DtaWriter(_Writer):
 
     Parameters
     ----------
-    where, schema, num_rows, metadata, rename_invalid_names:
-        As for :class:`SavWriter`; the default string width is 244, and Stata's
-        naming rules are the stricter pair - letters, digits and ``_`` only, 32
-        characters, and its own list of reserved words.
+    where:
+        Output path or a binary file object.
+    schema:
+        Arrow schema of the tables/batches that will be written.
+    num_rows:
+        Total number of rows that will be written; Stata stores it in the header.
+    metadata:
+        Optional variable labels, formats, value labels, missing values, file
+        label and notes. Omit it to declare nothing at all; likewise a column of
+        ``schema`` that no mapping mentions is written with nothing declared
+        about it. Entries naming a column that is not in ``schema`` are ignored.
     variable_ranges:
         Minimum and maximum values each integer column will hold, for the columns
         you know. Stata's integer types have asymmetric bounds: ``byte`` is
@@ -276,8 +394,28 @@ class DtaWriter(_Writer):
         bound). A column whose values fall outside its type's range is written as the
         next Stata type with room for it, and incoming batches are cast to that type.
         Pass as ``{column_name: (min, max), ...}``.
+    rename_invalid_names:
+        Rename any column whose name Stata would reject - illegal characters
+        become ``_``, a name that cannot start as it does gains a ``v``, a
+        reserved word gains a trailing ``_``, an over-long one is cut, and the
+        results are made unique. Stata's rules are the stricter of the two
+        formats': letters, digits and ``_`` only, 32 characters, and its own list
+        of reserved words. Off by default: an illegal name is an error when
+        ReadStat writes the header. The renames are warned about and left on
+        :attr:`renamed_variables`; metadata entries follow their variable.
+    on_text_limits_exceeded:
+        What to do with text Stata cannot hold. ``"error"``, the default, raises
+        :class:`ValueError` naming the field and the limit; ``"truncate"`` cuts
+        to the longest prefix that fits, never splitting a multibyte character,
+        and warns with :class:`~readstat_arrow.ReadstatWarning`. What Stata holds:
+        320 bytes and 80 characters of variable label, 32 000 bytes of value
+        label, 256 bytes and 80 characters of file label, 67 784 bytes per note,
+        and 2 045 in a string value. The module docstring has the same for SPSS,
+        and why each number is what it is.
 
-    Files are written in Stata format 118 (Stata 14 and later, Unicode).
+    Files are written in Stata format 118 (Stata 14 and later, Unicode). A string
+    variable is written ``storage_width`` bytes wide, or 244 when the variable
+    does not say; use :func:`write_dta` instead to size the columns from the data.
 
     ``int8``/``int16``/``int32``/``float32``/``float64`` map to Stata's
     ``byte``/``int``/``long``/``float``/``double``. Other integer types are
@@ -295,8 +433,11 @@ class DtaWriter(_Writer):
         *,
         variable_ranges: Mapping[str, tuple[int, int]] | None = None,
         rename_invalid_names: bool = False,
+        on_text_limits_exceeded: TextLimitPolicy = "error",
     ) -> None:
-        super().__init__(where, schema, num_rows, metadata, variable_ranges, rename_invalid_names)
+        super().__init__(
+            where, schema, num_rows, metadata, variable_ranges, rename_invalid_names, on_text_limits_exceeded
+        )
 
 
 def write_sav(
@@ -305,11 +446,38 @@ def write_sav(
     metadata: Metadata | None = None,
     *,
     rename_invalid_names: bool = False,
+    on_text_limits_exceeded: TextLimitPolicy = "error",
 ) -> None:
-    """Write ``table`` as an SPSS ``.sav`` file. String widths are taken from the data."""
+    """Write ``table`` as an SPSS ``.sav`` file, in one call.
+
+    Parameters
+    ----------
+    where:
+        Output path or a binary file object.
+    table:
+        The rows to write. String columns are sized from the data rather than
+        left at the 255-byte default, so the file pads no value further than it
+        has to; a ``storage_width`` in ``metadata`` is overridden by the
+        measurement, which is what the data actually needs.
+    metadata:
+        Optional variable labels, formats, value labels, missing values, file
+        label and notes, as for :class:`SavWriter`. Omit it to declare nothing.
+    rename_invalid_names:
+        Rename any column whose name SPSS would reject, rather than failing on
+        it; see :class:`SavWriter`, which does the renaming.
+    on_text_limits_exceeded:
+        ``"error"`` to refuse text SPSS cannot hold, ``"truncate"`` to cut it to
+        the longest prefix that fits and warn. See :class:`SavWriter` for the
+        limits, and the module docstring for both formats' side by side.
+    """
     metadata = _with_measured_widths(table, metadata)
     with SavWriter(
-        where, table.schema, table.num_rows, metadata, rename_invalid_names=rename_invalid_names
+        where,
+        table.schema,
+        table.num_rows,
+        metadata,
+        rename_invalid_names=rename_invalid_names,
+        on_text_limits_exceeded=on_text_limits_exceeded,
     ) as writer:
         writer.write_table(table)
 
@@ -320,19 +488,44 @@ def write_dta(
     metadata: Metadata | None = None,
     *,
     rename_invalid_names: bool = False,
+    on_text_limits_exceeded: TextLimitPolicy = "error",
 ) -> None:
-    """Write ``table`` as a Stata ``.dta`` file.
+    """Write ``table`` as a Stata ``.dta`` file, in one call.
 
-    String widths are taken from the data, and integer columns holding values outside
-    Stata's type bounds (e.g. an ``int8`` with value -128, outside byte's -127 minimum)
-    are widened to the next Stata type with room for them, since the data is known here;
-    see :func:`_widen_for_stata`. The incremental :class:`DtaWriter` cannot do that and
-    reports such values as errors instead.
+    Parameters
+    ----------
+    where:
+        Output path or a binary file object.
+    table:
+        The rows to write. Holding the whole table lets this do two things
+        :class:`DtaWriter` cannot. String columns are sized from the data rather
+        than left at the 244-byte default, overriding any ``storage_width`` in
+        ``metadata``; and an integer column holding values outside its Stata
+        type's bounds (an ``int8`` with -128, say, below byte's -127 minimum) is
+        widened to the next type with room for it - see :func:`_widen_for_stata`.
+        The incremental writer reports such values as errors instead.
+    metadata:
+        Optional variable labels, formats, value labels, missing values, file
+        label and notes, as for :class:`DtaWriter`. Omit it to declare nothing.
+    rename_invalid_names:
+        Rename any column whose name Stata would reject, rather than failing on
+        it; see :class:`DtaWriter`, which does the renaming.
+    on_text_limits_exceeded:
+        ``"error"`` to refuse text Stata cannot hold, ``"truncate"`` to cut it to
+        the longest prefix that fits and warn. Because the widths come from the
+        data, this also decides a column holding anything over Stata's 2 045-byte
+        string maximum. See :class:`DtaWriter` for the limits, and the module
+        docstring for both formats' side by side.
     """
     table = _widen_for_stata(table)
     metadata = _with_measured_widths(table, metadata)
     with DtaWriter(
-        where, table.schema, table.num_rows, metadata, rename_invalid_names=rename_invalid_names
+        where,
+        table.schema,
+        table.num_rows,
+        metadata,
+        rename_invalid_names=rename_invalid_names,
+        on_text_limits_exceeded=on_text_limits_exceeded,
     ) as writer:
         writer.write_table(table)
 
@@ -390,6 +583,7 @@ class _ColumnPlan:
         fmt: str | None,
         file_format: FileFormat,
         tagged: bool,
+        on_text_limits_exceeded: TextLimitPolicy,
     ):
         self.name = name
         self.kind = kind
@@ -399,6 +593,7 @@ class _ColumnPlan:
         self.format = fmt
         self.file_format = file_format
         self.tagged = tagged  # column is struct<value, tag> (see the reader's preserve_user_missing)
+        self.on_text_limits_exceeded = on_text_limits_exceeded
 
     @classmethod
     def build(
@@ -407,6 +602,7 @@ class _ColumnPlan:
         metadata: Metadata,
         file_format: FileFormat,
         value_range: tuple[int, int] | None = None,
+        on_text_limits_exceeded: TextLimitPolicy = "error",
     ) -> _ColumnPlan:
         name = field.name
         typ = field.type
@@ -448,6 +644,18 @@ class _ColumnPlan:
         if kind == _K_STRING:
             declared = metadata.storage_widths.get(name) or _DEFAULT_STRING_WIDTH[file_format]
             storage_width = max(declared, 1)
+            widest = _LIMITS[file_format]["string value"].max_bytes
+            if storage_width > widest:
+                too_wide = (
+                    f"column {name!r} needs {storage_width} bytes; "
+                    f"{DISPLAY_NAME[file_format]} strings stop at {widest}"
+                )
+                if on_text_limits_exceeded == "error":
+                    raise ValueError(f"{too_wide}. Pass on_text_limits_exceeded='truncate' to cut the values")
+                warnings.warn(  # build -> _Writer.__init__ -> SavWriter/DtaWriter -> caller
+                    f"{too_wide}, values truncated to {widest}", ReadstatWarning, stacklevel=4
+                )
+                storage_width = widest
 
         discrete, span = _missing_parts(metadata.missing_values.get(name), name)
         if discrete or span is not None:
@@ -464,7 +672,9 @@ class _ColumnPlan:
         if kind == _K_STRING and tagged:
             raise ValueError(f"column {field.name!r}: only numeric variables can have tagged missing values")
 
-        return cls(name, kind, metadata, temporal, storage_width, fmt, file_format, tagged)
+        return cls(
+            name, kind, metadata, temporal, storage_width, fmt, file_format, tagged, on_text_limits_exceeded
+        )
 
     def prepare(self, array: pa.Array) -> tuple[pa.Array, pa.Array | None]:
         """Convert ``array`` to the exact Arrow type the compiled writer reads for this kind.
@@ -481,6 +691,8 @@ class _ColumnPlan:
         target = _KIND_TYPE[self.kind]
         if not array.type.equals(target):
             array = pc.cast(array, target)
+        if self.kind == _K_STRING and self.on_text_limits_exceeded == "truncate":
+            array = _cut_values(array, self.storage_width, self.name)
         return array, tags
 
     def as_spec(self, label_set: str | None) -> dict[str, t.Any]:
@@ -490,7 +702,15 @@ class _ColumnPlan:
             "name": name,
             "kind": self.kind,
             "storage_width": self.storage_width,
-            "label": _fit(metadata.variable_labels.get(name), self.file_format, "variable label", name),
+            # _fit -> as_spec -> _Writer.__init__ -> SavWriter/DtaWriter -> caller
+            "label": _fit(
+                text=metadata.variable_labels.get(name),
+                file_format=self.file_format,
+                field="variable label",
+                owner=name,
+                on_text_limits_exceeded=self.on_text_limits_exceeded,
+                stacklevel=5,
+            ),
             "format": self.format,
             "label_set": label_set,
             "measure": _MEASURE[metadata.measures.get(name) or "unknown"],
@@ -506,8 +726,8 @@ class _ColumnPlan:
 _STATA_STR_TYPE = re.compile(r"str\d", re.IGNORECASE)
 
 # What each format accepts in a variable name, for _sanitised_names. ReadStat
-# checks its own version of these when it writes the header (and is laxer than
-# Stata on length: it allows 129 bytes where Stata 118 allows 32 characters).
+# checks its own version of these when it writes the header, so a name that
+# breaks them is an error unless the caller asked for renaming.
 _NAME_RULES: FormatMap[dict[str, t.Any]] = {
     "sav": {
         "extra": "._$@#",
@@ -643,7 +863,7 @@ def _tag_codes(array: pa.Array, name: str) -> pa.Array:
 
 
 def _plan_label_sets(
-    plans: list[_ColumnPlan], file_format: FileFormat
+    plans: list[_ColumnPlan], file_format: FileFormat, on_text_limits_exceeded: TextLimitPolicy
 ) -> tuple[list[dict[str, t.Any]], dict[str, str]]:
     """Turn ``Metadata.value_labels`` into ReadStat label sets.
 
@@ -661,16 +881,31 @@ def _plan_label_sets(
         set_name = set_name_for_codes.get(codes)
         if set_name is None:
             set_name = set_name_for_codes[codes] = plan.name
-            specs.append(_label_set_spec(set_name, codes, file_format))
+            specs.append(_label_set_spec(set_name, codes, file_format, on_text_limits_exceeded))
         set_name_for_variable[plan.name] = set_name
     return specs, set_name_for_variable
 
 
 def _label_set_spec(
-    name: str, codes: tuple[tuple[Value, str], ...], file_format: FileFormat
+    name: str,
+    codes: tuple[tuple[Value, str], ...],
+    file_format: FileFormat,
+    on_text_limits_exceeded: TextLimitPolicy,
 ) -> dict[str, t.Any]:
     values = [value for value, _ in codes]
-    texts = [_fit(text, file_format, "value label", f"variable {name!r}") or "" for _, text in codes]
+    # _fit -> _label_set_spec -> _plan_label_sets -> _Writer.__init__ -> SavWriter/DtaWriter -> caller
+    texts = [
+        _fit(
+            text=text,
+            file_format=file_format,
+            field="value label",
+            owner=f"variable {name!r}",
+            on_text_limits_exceeded=on_text_limits_exceeded,
+            stacklevel=6,
+        )
+        or ""
+        for _, text in codes
+    ]
     if file_format == "sav":
         if all(isinstance(v, str) for v in values):
             kind = _K_STRING
@@ -697,9 +932,22 @@ def _label_set_spec(
                 )
             else:
                 labels.append((int(value), text))
+        # Stata looks a label up by binary search, so it refuses a repeated key.
+        # Distinct codes can still collide here, since 1 and 1.0 both key on 1.
+        _reject_duplicate_keys(name, [key for key, _ in labels])
+        _reject_duplicate_keys(name, [tag for tag, _ in tags])
         return {"name": name, "kind": _K_INT32, "labels": labels, "tags": tags}
     else:
         t.assert_never(file_format)
+
+
+def _reject_duplicate_keys(name: str, keys: Sequence[Value]) -> None:
+    """Stata stores one label per key; a repeated one is an error, not a last-wins."""
+    seen: set[Value] = set()
+    for key in keys:
+        if key in seen:
+            raise ValueError(f"variable {name!r}: Stata cannot label value {key!r} more than once")
+        seen.add(key)
 
 
 def _warn_renames(renamed: dict[str, str], file_format: FileFormat) -> None:
@@ -716,22 +964,64 @@ def _warn_renames(renamed: dict[str, str], file_format: FileFormat) -> None:
     )
 
 
-def _fit(text: str | None, file_format: FileFormat, field: str, owner: str) -> str | None:
-    """Truncate ``text`` to the format's byte limit for ``field`` without splitting a character."""
+def _fit(
+    text: str | None,
+    file_format: FileFormat,
+    field: str,
+    owner: str,
+    on_text_limits_exceeded: TextLimitPolicy,
+    stacklevel: int,
+) -> str | None:
+    """Bring ``text`` within the format's limit for ``field``, or raise if it is over it.
+
+    ``stacklevel`` counts the frames from here out to the caller of the writer, and
+    so differs per call site; the point is for the warning to name the user's line.
+    """
     if text is None:
         return None
-    limit = _TEXT_LIMITS[file_format][field]
-    encoded = text.encode("utf-8")
-    if len(encoded) <= limit:
+    limit = _LIMITS[file_format][field]
+    if not limit.exceeded_by(text):
         return text
-    # Decoding with "ignore" drops the partial multibyte sequence at the cut, if any.
-    fitted = encoded[:limit].decode("utf-8", "ignore")
-    warnings.warn(
-        f"{field} of {owner} is {len(encoded)} bytes; {file_format} allows {limit}, truncated to {fitted!r}",
-        ReadstatWarning,
-        stacklevel=2,
+    too_long = (
+        f"{field} of {owner} is {len(text.encode('utf-8'))} bytes and {len(text)} characters; "
+        f"{DISPLAY_NAME[file_format]} allows {limit}"
     )
+    if on_text_limits_exceeded == "error":
+        raise ValueError(f"{too_long}. Pass on_text_limits_exceeded='truncate' to cut it instead")
+    fitted = _cut(text, limit)
+    warnings.warn(f"{too_long}, truncated to {fitted!r}", ReadstatWarning, stacklevel=stacklevel)
     return fitted
+
+
+def _cut_values(array: pa.Array, width: int, name: str) -> pa.Array:
+    """Cut every value in a string ``array`` to ``width`` bytes, never splitting a character.
+
+    A value wider than its column is an error in both formats, so under
+    ``on_text_limits_exceeded="truncate"`` the values are brought down to the width the column
+    was actually given. The whole-column scan is cheap; the per-value rebuild only
+    happens when something really is too wide.
+    """
+    lengths = pc.binary_length(pc.cast(array, pa.large_binary()))
+    if not pc.any(pc.greater(lengths, width)).as_py():
+        return array
+    limit = _Limit(width)
+    cut = [None if v is None else _cut(v, limit) for v in array.to_pylist()]
+    warnings.warn(
+        f"column {name!r}: values longer than {width} bytes truncated",
+        ReadstatWarning,
+        stacklevel=5,  # _cut_values -> prepare -> write_batch -> write_table -> caller
+    )
+    return pa.array(cut, array.type)
+
+
+def _cut(text: str, limit: _Limit) -> str:
+    """The longest prefix of ``text`` within ``limit``, never splitting a character."""
+    fitted = text if limit.max_chars is None else text[: limit.max_chars]
+    encoded = fitted.encode("utf-8")
+    if len(encoded) <= limit.max_bytes:
+        return fitted
+    # Decoding with "ignore" drops the partial multibyte sequence at the cut, if any.
+    return encoded[: limit.max_bytes].decode("utf-8", "ignore")
 
 
 def _missing_parts(missing: Missingness | None, name: str) -> tuple[list[Value], tuple[Value, Value] | None]:

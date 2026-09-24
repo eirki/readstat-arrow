@@ -3,7 +3,7 @@
 ## ReadStat
 
 Upstream: https://github.com/WizardMac/ReadStat
-Commit:   78bb8a9419e9aa505746bdb5c71683a203da53e7
+Commit:   835b88c8c79d00fcd028c9cfa1226de2fd18be20
 
 Copied verbatim from upstream; no local patches.
 

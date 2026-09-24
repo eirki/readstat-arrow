@@ -417,7 +417,7 @@ def test_sav_multiple_response_sets() -> None:
     _schema, _rows, metadata = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
     assert metadata.multiple_response_sets == [
         {
-            "name": "categorical_array",
+            "name": "$categorical_array",
             "label": None,
             "type": "C",
             "is_dichotomy": False,
@@ -425,7 +425,7 @@ def test_sav_multiple_response_sets() -> None:
             "variables": ["ca_subvar_1", "ca_subvar_2", "ca_subvar_3"],
         },
         {
-            "name": "mymrset",
+            "name": "$mymrset",
             "label": "My multiple response set",
             "type": "D",
             "is_dichotomy": True,

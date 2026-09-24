@@ -31,7 +31,7 @@ from readstat_arrow.reader import (
     read_sav,
     read_sav_metadata,
 )
-from readstat_arrow.writer import DtaWriter, SavWriter, write_dta, write_sav
+from readstat_arrow.writer import DtaWriter, SavWriter, TextLimitPolicy, write_dta, write_sav
 
 __all__ = [
     "Alignment",
@@ -47,6 +47,7 @@ __all__ = [
     "ReadstatWarning",
     "SavStreamingReader",
     "SavWriter",
+    "TextLimitPolicy",
     "Value",
     "open_dta",
     "open_sav",
