@@ -746,6 +746,22 @@ def test_truncating_only_touches_the_values_that_do_not_fit() -> None:
     ]  # Stata has no missing string
 
 
+def test_truncating_leaves_values_that_fit_alone() -> None:
+    out = io.BytesIO()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", readstat_arrow.ReadstatWarning)
+        readstat_arrow.write_dta(
+            out,
+            pa.table({"s": pa.array(["short", "日本"])}),
+            on_text_limits_exceeded="truncate",
+        )
+    out.seek(0)
+    back, _ = readstat_arrow.read_dta(out)
+
+    assert back.column("s").to_pylist() == ["short", "日本"]
+
+
 def test_truncating_cuts_values_to_a_declared_width() -> None:
     """The incremental writer is told the width, so the values are brought down to it."""
     table = pa.table({"s": pa.array(["abcdefgh"], pa.large_string())})
