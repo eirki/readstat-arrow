@@ -21,30 +21,15 @@ from readstat_arrow._formats import FileFormat, file_format_values
 DATA_DIR = Path(__file__).parent / "data"
 
 # ``tests/data/sample.*``: the same five rows in both formats.
-SAMPLES = {
-    "sav": DATA_DIR / "sample.sav",
-    "dta": DATA_DIR / "sample.dta",
-}
-READER_FUNCS = {
-    "sav": readstat_arrow.read_sav,
-    "dta": readstat_arrow.read_dta,
-}
-OPEN_FUNCS = {
-    "sav": readstat_arrow.open_sav,
-    "dta": readstat_arrow.open_dta,
-}
+SAMPLES = {"sav": DATA_DIR / "sample.sav", "dta": DATA_DIR / "sample.dta"}
+READER_FUNCS = {"sav": readstat_arrow.read_sav, "dta": readstat_arrow.read_dta}
+OPEN_FUNCS = {"sav": readstat_arrow.open_sav, "dta": readstat_arrow.open_dta}
 METADATA_READER_FUNCS = {
     "sav": readstat_arrow.read_sav_metadata,
     "dta": readstat_arrow.read_dta_metadata,
 }
-WRITER_FUNCS = {
-    "sav": readstat_arrow.write_sav,
-    "dta": readstat_arrow.write_dta,
-}
-WRITER_CLASSES = {
-    "sav": readstat_arrow.SavWriter,
-    "dta": readstat_arrow.DtaWriter,
-}
+WRITER_FUNCS = {"sav": readstat_arrow.write_sav, "dta": readstat_arrow.write_dta}
+WRITER_CLASSES = {"sav": readstat_arrow.SavWriter, "dta": readstat_arrow.DtaWriter}
 
 
 @pytest.fixture(name="fmt", params=file_format_values, ids=file_format_values)

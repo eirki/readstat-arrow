@@ -89,12 +89,14 @@ def test_read_sample(fmt: FileFormat) -> None:
     # What only one of the two files has a way of saying.
     if fmt == "sav":
         assert metadata.measures["mychar"] == "nominal"
-        assert metadata.storage_widths["mychar"] == 1  # A1: the declared width, not SPSS's 8-byte cell
+        # A1: the declared width, not SPSS's 8-byte cell
+        assert metadata.storage_widths["mychar"] == 1
         assert metadata.notes  # sample.sav carries a document record
         assert metadata.missing_values == {}
     elif fmt == "dta":
         assert metadata.formats["mytime"] == "%tcHH:MM:SS"
-        assert metadata.missing_values == {}  # an SPSS-only concept, so empty here whatever the file
+        # an SPSS-only concept, so empty here whatever the file
+        assert metadata.missing_values == {}
     else:
         t.assert_never(fmt)
 
@@ -104,7 +106,8 @@ def test_column_selection(fmt: FileFormat) -> None:
     table, metadata = read(SAMPLES[fmt], columns=["mynum", "mychar"])
     # File order wins over the requested order.
     assert table.equals(pa.table({"mychar": MYCHAR, "mynum": MYNUM}))
-    assert table.column_names == ["mychar", "mynum"]  # file order wins in the metadata too
+    # file order wins in the metadata too
+    assert table.column_names == ["mychar", "mynum"]
     assert list(metadata.formats) == ["mychar", "mynum"]
 
 
@@ -310,9 +313,15 @@ def test_read_from_zip_member(fmt: FileFormat, tmp_path: Path) -> None:
 
 def test_sav_preserve_user_missing() -> None:
     default, metadata = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav")
-    kept, _ = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav", preserve_user_missing=True)
+    kept, _ = readstat_arrow.read_sav(
+        DATA_DIR / "sample_missing.sav", preserve_user_missing=True
+    )
 
-    assert metadata.missing_values["mynum"] == {"lo": 2000.0, "hi": 3000.0, "value": -1.0}
+    assert metadata.missing_values["mynum"] == {
+        "lo": 2000.0,
+        "hi": 3000.0,
+        "value": -1.0,
+    }
     assert metadata.missing_values["myord"] == {"values": [-1.0, -2.0, -3.0]}
     assert "mychar" not in metadata.missing_values
     assert default.column("mynum").null_count > kept.column("mynum").null_count
@@ -327,7 +336,9 @@ def test_sav_recoverable_parse_problems_become_warnings() -> None:
     and skipped.
     """
     out = io.BytesIO()
-    readstat_arrow.write_sav(out, pa.table({"averylongvariablename": pa.array([1.0, 2.0])}))
+    readstat_arrow.write_sav(
+        out, pa.table({"averylongvariablename": pa.array([1.0, 2.0])})
+    )
     data = out.getvalue().replace(b"AVERYLON=averylong", b"AVERYLOX=averylong")
 
     with pytest.warns(readstat_arrow.ReadstatWarning, match="Failed to find AVERYLOX"):
@@ -352,10 +363,13 @@ def test_sav_variable_without_a_display_format() -> None:
     blanked = data[: name_at - 8] + bytes(8) + data[name_at:]
 
     table, metadata = readstat_arrow.read_sav(io.BytesIO(blanked))
-    schema, num_rows, metadata_only = readstat_arrow.read_sav_metadata(io.BytesIO(blanked))
+    schema, num_rows, metadata_only = readstat_arrow.read_sav_metadata(
+        io.BytesIO(blanked)
+    )
 
     assert "num" not in metadata.formats  # the file declares none
-    assert metadata.storage_widths == {"num": 8}  # and no format to read a declared width out of
+    # and no format to read a declared width out of
+    assert metadata.storage_widths == {"num": 8}
     assert table.schema.field("num").type == pa.float64()  # nothing says it is a date
     assert table.column("num").to_pylist() == [1.0, 2.0]
     assert (num_rows, schema, metadata_only) == (2, table.schema, metadata)
@@ -388,7 +402,9 @@ def test_sav_very_long_strings() -> None:
 def test_sav_string_user_missing_values() -> None:
     """`MISSING VALUES mychar ('Z')`: a string value declared missing."""
     table, metadata = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav")
-    preserved, _ = readstat_arrow.read_sav(DATA_DIR / "missing_char.sav", preserve_user_missing=True)
+    preserved, _ = readstat_arrow.read_sav(
+        DATA_DIR / "missing_char.sav", preserve_user_missing=True
+    )
 
     assert table.column("mychar").to_pylist() == [None, "a"]
     assert preserved.column("mychar").to_pylist() == ["Z", "a"]
@@ -398,7 +414,9 @@ def test_sav_string_user_missing_values() -> None:
 
 def test_sav_missing_ranges_and_labelled_missing_values() -> None:
     table, metadata = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav")
-    preserved, _ = readstat_arrow.read_sav(DATA_DIR / "simple_alltypes.sav", preserve_user_missing=True)
+    preserved, _ = readstat_arrow.read_sav(
+        DATA_DIR / "simple_alltypes.sav", preserve_user_missing=True
+    )
 
     # Three discrete missing values ...
     assert metadata.missing_values["x"] == {"values": [7.0, 8.0, 99.0]}
@@ -408,13 +426,22 @@ def test_sav_missing_ranges_and_labelled_missing_values() -> None:
     # concrete lower bound ReadStat reports, not -inf.
     assert metadata.missing_values["z"] == {"lo": -999.0, "hi": 0.0, "value": 999.0}
     assert table.column("z").to_pylist() == [None, None, 1.234, None, 3.14159, None]
-    assert preserved.column("z").to_pylist() == [-9.0, None, 1.234, 999.0, 3.14159, None]
+    assert preserved.column("z").to_pylist() == [
+        -9.0,
+        None,
+        1.234,
+        999.0,
+        3.14159,
+        None,
+    ]
     # A missing value can itself carry a value label.
     assert metadata.value_labels["z"] == [{"value": 999.0, "label": "skipped"}]
 
 
 def test_sav_multiple_response_sets() -> None:
-    _schema, _rows, metadata = readstat_arrow.read_sav_metadata(DATA_DIR / "simple_alltypes.sav")
+    _schema, _rows, metadata = readstat_arrow.read_sav_metadata(
+        DATA_DIR / "simple_alltypes.sav"
+    )
     assert metadata.multiple_response_sets == [
         {
             "name": "$categorical_array",
@@ -442,17 +469,24 @@ def test_dta_tagged_missing_values_are_null_by_default() -> None:
     table, metadata = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta")
 
     assert table.schema.types == [pa.float32()] * 9
-    assert table.to_pydict() == {f"var{i}": [None] for i in range(1, 9)} | {"var9": [1.0]}
+    assert table.to_pydict() == {f"var{i}": [None] for i in range(1, 9)} | {
+        "var9": [1.0]
+    }
     # A tag can carry a value label.
     assert metadata.value_labels["var1"] == [{"value": "a", "label": "missing"}]
 
 
 def test_dta_tagged_missing_values_as_structs() -> None:
     """With preserve_user_missing=True every numeric column is struct<value, tag>."""
-    table, _ = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta", preserve_user_missing=True)
+    table, _ = readstat_arrow.read_dta(
+        DATA_DIR / "missing_test.dta", preserve_user_missing=True
+    )
 
     tag_type = pa.dictionary(pa.int8(), pa.string())
-    assert table.schema.types == [pa.struct([("value", pa.float32()), ("tag", tag_type)])] * 9
+    assert (
+        table.schema.types
+        == [pa.struct([("value", pa.float32()), ("tag", tag_type)])] * 9
+    )
     assert table.column("var1").to_pylist() == [{"value": None, "tag": "a"}]
     assert table.column("var6").to_pylist() == [{"value": None, "tag": "z"}]
     assert table.column("var9").to_pylist() == [{"value": 1.0, "tag": None}]
@@ -464,10 +498,14 @@ def test_dta_tagged_missing_values_as_structs() -> None:
 
 def test_dta_tag_structs_wrap_every_numeric_column() -> None:
     """The schema depends on the file's dictionary, not on which cells happen to be tagged."""
-    table, _ = readstat_arrow.read_dta(DATA_DIR / "sample.dta", preserve_user_missing=True)
+    table, _ = readstat_arrow.read_dta(
+        DATA_DIR / "sample.dta", preserve_user_missing=True
+    )
     for name in ("mynum", "mylabl", "mydate", "dtime", "mytime"):
         typ = table.schema.field(name).type
         assert pa.types.is_struct(typ) and [f.name for f in typ] == ["value", "tag"]
-    assert table.schema.field("mychar").type == pa.large_string()  # strings cannot be missing in Stata
-    assert table.schema.field("mydate").type.field("value").type == pa.date32()  # dates are still converted
+    # strings cannot be missing in Stata
+    assert table.schema.field("mychar").type == pa.large_string()
+    # dates are still converted
+    assert table.schema.field("mydate").type.field("value").type == pa.date32()
     assert table.column("mynum").to_pylist()[0] == {"value": 1.1, "tag": None}

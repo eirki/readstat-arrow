@@ -9,16 +9,16 @@ repos:
   # Requires uv on PATH, which the project requires anyway.
   - repo: local
     hooks:
-      - id: ruff-check
-        name: ruff check
-        entry: uv run --frozen ruff check --fix
+      - id: isort
+        name: isort
+        entry: uv run --frozen isort
         language: system
         types_or: [python, pyi]
         require_serial: true
 
-      - id: ruff-format
-        name: ruff format
-        entry: uv run --frozen ruff format
+      - id: black
+        name: black
+        entry: uv run --frozen black
         language: system
         types_or: [python, pyi]
         require_serial: true

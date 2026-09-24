@@ -34,7 +34,8 @@ dev = [
   "cython>=3.1",
   "setuptools>=77",
   "pytest>=8",
-  "ruff>=0.6",
+  "black>=24",
+  "isort>=5.13",
   "mypy>=1.11",
   "coverage>=7.16.1",
   "bumpver>=2026.1132",
@@ -95,26 +96,13 @@ exclude_also = ["pragma: no cover", ".*assert_never.*"]
 omit = ["src/readstat_arrow/_cython/*"]
 
 
-[tool.ruff]
-line-length = 110
-target-version = "py311"
-src = ["src", "tests"]
-extend-exclude = ["*.md"] # keep hand-aligned comments in README code blocks
+[tool.black]
+target-version = ["py311"]
+skip-magic-trailing-comma = true
 
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-# _cython/ is Cython pure-Python mode; it legitimately uses patterns ruff dislikes.
-per-file-ignores = { "src/readstat_arrow/_cython/*.py" = [
-  "F401",
-  "F841",
-  "F842",
-  "I001",
-  "SIM109",
-  "RUF012",
-  "UP",
-] }
-# Disable fix for unused imports (`F401`).
-unfixable = ["F401"]
+[tool.isort]
+profile = "black"
+src_paths = ["src", "tests"]
 
 [tool.mypy]
 python_version = "3.11"

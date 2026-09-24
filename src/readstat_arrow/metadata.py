@@ -68,7 +68,11 @@ _REPR_ITEMS = 3
 def _elided(items: Sequence[object]) -> str:
     """``[a, b, c, ... +7 more]``: the first few entries, then how many were left out."""
     shown = ", ".join(repr(item) for item in items[:_REPR_ITEMS])
-    return f"[{shown}]" if len(items) <= _REPR_ITEMS else f"[{shown}, ... +{len(items) - _REPR_ITEMS} more]"
+    return (
+        f"[{shown}]"
+        if len(items) <= _REPR_ITEMS
+        else f"[{shown}, ... +{len(items) - _REPR_ITEMS} more]"
+    )
 
 
 def _elided_map(mapping: Mapping[object, object]) -> str:
@@ -76,7 +80,9 @@ def _elided_map(mapping: Mapping[object, object]) -> str:
     items = list(mapping.items())
     shown = ", ".join(f"{k!r}: {v!r}" for k, v in items[:_REPR_ITEMS])
     return (
-        f"{{{shown}}}" if len(items) <= _REPR_ITEMS else f"{{{shown}, ... +{len(items) - _REPR_ITEMS} more}}"
+        f"{{{shown}}}"
+        if len(items) <= _REPR_ITEMS
+        else f"{{{shown}, ... +{len(items) - _REPR_ITEMS} more}}"
     )
 
 
@@ -93,10 +99,10 @@ class Metadata:
     """
 
     variable_labels: Mapping[str, str | None] = field(default_factory=dict)
-    value_labels: Mapping[str, list[Code] | None] = field(default_factory=dict)  # in the file's order
-    formats: Mapping[str, str | None] = field(default_factory=dict)  # display format, "F8.2" / "%td"
-    storage_widths: Mapping[str, int | None] = field(default_factory=dict)  # declared byte width
-    display_widths: Mapping[str, int | None] = field(default_factory=dict)  # columns the software shows
+    value_labels: Mapping[str, list[Code] | None] = field(default_factory=dict)
+    formats: Mapping[str, str | None] = field(default_factory=dict)
+    storage_widths: Mapping[str, int | None] = field(default_factory=dict)
+    display_widths: Mapping[str, int | None] = field(default_factory=dict)
     measures: Mapping[str, Measure | None] = field(default_factory=dict)
     alignments: Mapping[str, Alignment | None] = field(default_factory=dict)
     missing_values: Mapping[str, Missingness | None] = field(default_factory=dict)
@@ -126,7 +132,10 @@ class Metadata:
         if any(new in getattr(self, field_name) for field_name in PER_VARIABLE):
             raise ValueError(f"variable {new!r} already declares something")
         renamed: dict[str, t.Any] = {
-            field_name: {(new if k == old else k): v for k, v in getattr(self, field_name).items()}
+            field_name: {
+                (new if k == old else k): v
+                for k, v in getattr(self, field_name).items()
+            }
             for field_name in PER_VARIABLE
         }
         return replace(self, **renamed)
@@ -146,6 +155,9 @@ class Metadata:
         return replace(
             self,
             notes=[*self.notes, *other.notes],
-            multiple_response_sets=[*self.multiple_response_sets, *other.multiple_response_sets],
+            multiple_response_sets=[
+                *self.multiple_response_sets,
+                *other.multiple_response_sets,
+            ],
             **combined,
         )

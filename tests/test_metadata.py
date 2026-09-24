@@ -43,10 +43,19 @@ def test_mappings_hold_only_what_the_file_declares(fmt: FileFormat) -> None:
     read_metadata = METADATA_READER_FUNCS[fmt]
     schema, _num_rows, metadata = read_metadata(SAMPLES[fmt])
 
-    assert schema.names == ["mychar", "mynum", "mydate", "dtime", "mylabl", "myord", "mytime"]
+    assert schema.names == [
+        "mychar",
+        "mynum",
+        "mydate",
+        "dtime",
+        "mylabl",
+        "myord",
+        "mytime",
+    ]
     assert metadata.variable_labels["mychar"] == "character"
     assert metadata.value_labels == SAMPLE_VALUE_LABELS[fmt]
-    assert "mychar" not in metadata.value_labels  # ... and an undeclared name is simply absent
+    # ... and an undeclared name is simply absent
+    assert "mychar" not in metadata.value_labels
 
 
 def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
@@ -79,7 +88,15 @@ def test_rename_variable(fmt: FileFormat) -> None:
     assert "mylabl" not in renamed.formats
     assert "mylabl" in metadata.value_labels  # ... and the original is untouched
     # The entry keeps its place, so the repr still reads in file order.
-    assert list(renamed.formats) == ["mychar", "mynum", "mydate", "dtime", "sex", "myord", "mytime"]
+    assert list(renamed.formats) == [
+        "mychar",
+        "mynum",
+        "mydate",
+        "dtime",
+        "sex",
+        "myord",
+        "mytime",
+    ]
 
     with pytest.raises(ValueError, match="'myord' already declares something"):
         metadata.rename_variable("mylabl", "myord")
@@ -120,8 +137,12 @@ def _rename_all(metadata: Metadata, names: list[str], *, suffix: str) -> Metadat
 
 
 def test_sav_merge() -> None:
-    _sav_schema, _num_rows, sav = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
-    other_schema, _other_num_rows, other = readstat_arrow.read_sav_metadata(DATA_DIR / "sample_missing.sav")
+    _sav_schema, _num_rows, sav = readstat_arrow.read_sav_metadata(
+        DATA_DIR / "sample.sav"
+    )
+    other_schema, _other_num_rows, other = readstat_arrow.read_sav_metadata(
+        DATA_DIR / "sample_missing.sav"
+    )
     # Give the second file distinct variable names, as if it were another block of columns.
     other = _rename_all(other, other_schema.names, suffix="_b")
 
@@ -136,16 +157,22 @@ def test_sav_merge() -> None:
 
 
 def test_sav_merge_prefers_self_on_overlap() -> None:
-    schema, _num_rows, metadata = readstat_arrow.read_sav_metadata(DATA_DIR / "sample.sav")
+    schema, _num_rows, metadata = readstat_arrow.read_sav_metadata(
+        DATA_DIR / "sample.sav"
+    )
     labels: dict[str, str | None] = {name: "other" for name in schema.names}
     labels["extra"] = "Extra"
     other = replace(metadata, variable_labels=labels)
 
     merged = metadata.merge(other)
 
-    assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
-    assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
-    assert metadata.merge(metadata) == replace(metadata, notes=[*metadata.notes, *metadata.notes])
+    # self's version, not "other"
+    assert merged.variable_labels["mychar"] == "character"
+    # ... but other's own entries come along
+    assert merged.variable_labels["extra"] == "Extra"
+    assert metadata.merge(metadata) == replace(
+        metadata, notes=[*metadata.notes, *metadata.notes]
+    )
 
 
 def test_metadata_accepts_dict_with_narrower_value_types() -> None:
@@ -218,7 +245,7 @@ def test_metadata_missing_values_with_string_sequence() -> None:
     Also type checker should accept this without errors."""
     string_values: list[str] = ["a", "b", "c"]
     my_missing_values: dict[str, readstat_arrow.MissingValues] = {
-        "x": {"values": string_values},
+        "x": {"values": string_values}
     }
     metadata = Metadata(missing_values=my_missing_values)
 
@@ -230,7 +257,7 @@ def test_metadata_missing_values_with_maybe_mixed_sequence() -> None:
     expected. Also type checker should accept this without errors."""
     int_values_1: list[int] | list[str] = [9, 99, 999]
     my_missing_values: dict[str, readstat_arrow.MissingValues] = {
-        "x": {"values": int_values_1},
+        "x": {"values": int_values_1}
     }
     metadata = Metadata(missing_values=my_missing_values)
 
@@ -242,7 +269,11 @@ def test_metadata_missing_range() -> None:
     should accept this without errors."""
     int_range: readstat_arrow.MissingRange = {"lo": -999, "hi": 0}
     float_range: readstat_arrow.MissingRange = {"lo": -999.0, "hi": 0.0}
-    int_range_with_value: readstat_arrow.MissingRange = {"lo": -999, "hi": 0, "value": 999}
+    int_range_with_value: readstat_arrow.MissingRange = {
+        "lo": -999,
+        "hi": 0,
+        "value": 999,
+    }
     my_missing_values: dict[str, readstat_arrow.Missingness] = {
         "x": int_range,
         "y": float_range,

@@ -476,7 +476,9 @@ class ColumnBuilder:
         if self.kind == K_STRING:
             offsets = pa.py_buffer(self.offsets).slice(0, 8 * (n + 1))
             data = pa.py_buffer(self.data)
-            return pa.Array.from_buffers(typ, n, [validity, offsets, data], self.null_count)
+            return pa.Array.from_buffers(
+                typ, n, [validity, offsets, data], self.null_count
+            )
         item = _ITEM_SIZE[self.kind]
         data = pa.py_buffer(self.data).slice(0, item * n)
         return pa.Array.from_buffers(typ, n, [validity, data], self.null_count)
@@ -487,7 +489,9 @@ class ColumnBuilder:
             return None
         n = self.length
         self._release_views()
-        codes = pa.Array.from_buffers(pa.uint8(), n, [None, pa.py_buffer(self.tag_codes).slice(0, n)])
+        codes = pa.Array.from_buffers(
+            pa.uint8(), n, [None, pa.py_buffer(self.tag_codes).slice(0, n)]
+        )
         indices = pc.subtract(codes, 1).cast(pa.int8())  # 0 -> -1, masked out below
         indices = pc.if_else(pc.equal(codes, 0), pa.scalar(None, pa.int8()), indices)
         return pa.DictionaryArray.from_arrays(indices, TAG_LETTERS)
@@ -546,7 +550,10 @@ class StatsAccumulator:
                 self.max_v = v
         if self.all_integral and floor(v) != v:
             self.all_integral = False
-        if self.float32_exact and cython.cast(cython.double, cython.cast(cython.float, v)) != v:
+        if (
+            self.float32_exact
+            and cython.cast(cython.double, cython.cast(cython.float, v)) != v
+        ):
             self.float32_exact = False
 
     def to_dict(self) -> dict:
@@ -681,7 +688,9 @@ def _label_set(ctx: ParseContext, name: str) -> list:
 
 @cython.cfunc
 @cython.exceptval(check=False)
-def _handle_metadata(meta: cython.pointer(readstat_metadata_t), vctx: cython.p_void) -> cython.int:
+def _handle_metadata(
+    meta: cython.pointer(readstat_metadata_t), vctx: cython.p_void
+) -> cython.int:
     ctx: ParseContext = cython.cast(ParseContext, vctx)
     try:
         ctx.num_rows = readstat_get_row_count(meta)
@@ -699,8 +708,12 @@ def _handle_metadata(meta: cython.pointer(readstat_metadata_t), vctx: cython.p_v
                     "label": _decode(mr[i].label),
                     "type": chr(mr[i].type),
                     "is_dichotomy": bool(mr[i].is_dichotomy),
-                    "counted_value": None if mr[i].counted_value == -1 else mr[i].counted_value,
-                    "variables": [_decode(mr[i].subvariables[j]) for j in range(mr[i].num_subvars)],
+                    "counted_value": (
+                        None if mr[i].counted_value == -1 else mr[i].counted_value
+                    ),
+                    "variables": [
+                        _decode(mr[i].subvariables[j]) for j in range(mr[i].num_subvars)
+                    ],
                 }
             )
         ctx.multiple_response_sets = mr_sets
@@ -758,12 +771,24 @@ def _handle_variable(
         # Every mapping records only what the file actually declares.
         ctx.variables.append(name)
         ctx.column_types.append(_ARROW_TYPE[kind])
-        _record(ctx.variable_labels, name, _decode(readstat_variable_get_label(variable)))
+        _record(
+            ctx.variable_labels, name, _decode(readstat_variable_get_label(variable))
+        )
         _record(ctx.formats, name, _decode(readstat_variable_get_format(variable)))
-        _record(ctx.storage_widths, name, int(readstat_variable_get_storage_width(variable)))
+        _record(
+            ctx.storage_widths, name, int(readstat_variable_get_storage_width(variable))
+        )
         _record(ctx.display_widths, name, readstat_variable_get_display_width(variable))
-        _record(ctx.measures, name, _MEASURE_NAMES.get(readstat_variable_get_measure(variable)))
-        _record(ctx.alignments, name, _ALIGNMENT_NAMES.get(readstat_variable_get_alignment(variable)))
+        _record(
+            ctx.measures,
+            name,
+            _MEASURE_NAMES.get(readstat_variable_get_measure(variable)),
+        )
+        _record(
+            ctx.alignments,
+            name,
+            _ALIGNMENT_NAMES.get(readstat_variable_get_alignment(variable)),
+        )
         _record(ctx.missing_values, name, missing)
         set_name = _decode(val_labels)
         if set_name is not None:
@@ -776,7 +801,11 @@ def _handle_variable(
             # has to fit, which is a guess when the header does not say how long it is.
             capacity: cython.Py_ssize_t = ctx.batch_rows
             if capacity == 0:
-                capacity = ctx.num_rows if ctx.num_rows >= 0 else _INITIAL_CAPACITY_UNKNOWN_ROWS
+                capacity = (
+                    ctx.num_rows
+                    if ctx.num_rows >= 0
+                    else _INITIAL_CAPACITY_UNKNOWN_ROWS
+                )
             builder: ColumnBuilder = ColumnBuilder(name, kind, capacity)
             if narrowed:
                 builder.store = K_NARROWED
@@ -790,7 +819,9 @@ def _handle_variable(
 @cython.cfunc
 @cython.inline
 def _reads_as_null(
-    ctx: ParseContext, value: readstat_value_t, variable: cython.pointer(readstat_variable_t)
+    ctx: ParseContext,
+    value: readstat_value_t,
+    variable: cython.pointer(readstat_variable_t),
 ) -> cython.bint:
     """Whether a read would store this value as a null rather than keep it.
 
@@ -801,7 +832,9 @@ def _reads_as_null(
         return False
     if readstat_value_is_tagged_missing(value):
         return True
-    return not (ctx.preserve_user_missing and readstat_value_is_defined_missing(value, variable))
+    return not (
+        ctx.preserve_user_missing and readstat_value_is_defined_missing(value, variable)
+    )
 
 
 @cython.cfunc
@@ -824,7 +857,8 @@ def _handle_scan_value(
         if row + 1 > ctx.rows_seen:
             ctx.rows_seen = row + 1
         acc: StatsAccumulator = cython.cast(
-            StatsAccumulator, ctx.stats[readstat_variable_get_index_after_skipping(variable)]
+            StatsAccumulator,
+            ctx.stats[readstat_variable_get_index_after_skipping(variable)],
         )
         # A string column is read as it is stored whatever it holds, so its
         # values are not even looked at.
@@ -903,7 +937,10 @@ def _handle_value(
             if readstat_value_is_tagged_missing(value):
                 col.set_tagged_null(row, readstat_value_tag(value))
                 return READSTAT_HANDLER_OK
-            if not (ctx.preserve_user_missing and readstat_value_is_defined_missing(value, variable)):
+            if not (
+                ctx.preserve_user_missing
+                and readstat_value_is_defined_missing(value, variable)
+            ):
                 col.set_null(row)
                 return READSTAT_HANDLER_OK
             # preserve_user_missing=True: fall through and keep the defined-missing value
@@ -952,7 +989,9 @@ def _handle_value_label(
 
 @cython.cfunc
 @cython.exceptval(check=False)
-def _handle_note(note_index: cython.int, note: cython.p_const_char, vctx: cython.p_void) -> cython.int:
+def _handle_note(
+    note_index: cython.int, note: cython.p_const_char, vctx: cython.p_void
+) -> cython.int:
     ctx: ParseContext = cython.cast(ParseContext, vctx)
     try:
         ctx.notes.append(_decode(note) or "")
@@ -1016,7 +1055,9 @@ def _io_close(vctx: cython.p_void) -> cython.int:
 
 @cython.cfunc
 @cython.exceptval(check=False)
-def _io_seek(offset: readstat_off_t, whence: readstat_io_flags_t, vctx: cython.p_void) -> readstat_off_t:
+def _io_seek(
+    offset: readstat_off_t, whence: readstat_io_flags_t, vctx: cython.p_void
+) -> readstat_off_t:
     """Seek, in offsets relative to :attr:`_Source.base`, and report the new one."""
     src: _Source = cython.cast(_Source, vctx)
     try:
@@ -1036,7 +1077,9 @@ def _io_seek(offset: readstat_off_t, whence: readstat_io_flags_t, vctx: cython.p
 
 @cython.cfunc
 @cython.exceptval(check=False)
-def _io_read(buf: cython.p_void, nbyte: cython.size_t, vctx: cython.p_void) -> cython.ssize_t:
+def _io_read(
+    buf: cython.p_void, nbyte: cython.size_t, vctx: cython.p_void
+) -> cython.ssize_t:
     """Fill ``buf`` with up to ``nbyte`` bytes, short only at end of file.
 
     ReadStat reads a record at a time and treats a short read as the end of the
@@ -1057,7 +1100,11 @@ def _io_read(buf: cython.p_void, nbyte: cython.size_t, vctx: cython.p_void) -> c
                 chunk: bytes = src.file.read(nbyte - total)
                 n = len(chunk)
                 if n > 0:
-                    memcpy(cython.cast(cython.p_char, buf) + total, cython.cast(cython.p_char, chunk), n)
+                    memcpy(
+                        cython.cast(cython.p_char, buf) + total,
+                        cython.cast(cython.p_char, chunk),
+                        n,
+                    )
             if n == 0:
                 break
             total += n
@@ -1089,7 +1136,9 @@ FORMATS = ("sav", "dta")
 @cython.cfunc
 def _check(rc: readstat_error_t) -> cython.void:
     if rc != READSTAT_OK:
-        raise ReadstatError(_decode(readstat_error_message(rc)) or f"readstat error {int(rc)}")
+        raise ReadstatError(
+            _decode(readstat_error_message(rc)) or f"readstat error {int(rc)}"
+        )
 
 
 def parse(
@@ -1143,7 +1192,9 @@ def parse(
     if (batch_rows > 0) != (on_batch is not None):
         raise ValueError("pass batch_rows and on_batch together, or neither")
     if batch_rows and (metadata_only or scan):
-        raise ValueError("batch_rows reads values, so it goes with neither metadata_only nor scan")
+        raise ValueError(
+            "batch_rows reads values, so it goes with neither metadata_only nor scan"
+        )
 
     ctx: ParseContext = ParseContext()
     ctx.metadata_only = metadata_only
@@ -1217,7 +1268,9 @@ def parse(
     if not metadata_only and not scan:
         n_rows: cython.Py_ssize_t = ctx.rows_seen - ctx.batch_start
         if batch_rows:
-            if n_rows > 0:  # the remainder; exactly nothing when the rows divided evenly
+            if (
+                n_rows > 0
+            ):  # the remainder; exactly nothing when the rows divided evenly
                 _emit_batch(ctx, n_rows)
         else:
             for b in ctx.builders:

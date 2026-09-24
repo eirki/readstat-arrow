@@ -69,7 +69,9 @@ _SPSS_DTIME = {"DTIME"}
 
 _FORMAT_NAME = re.compile(r"^[A-Z][A-Z0-9]*[A-Z]")
 # Suffix of a Stata %tc format that shows only hours/minutes/seconds (+ optional am/pm).
-_STATA_TIME_ONLY = re.compile(r"[Hh]{1,2}(:[Mm]{2})?(:[Ss]{2}(\.s+)?)?(\s*[aApP]\.?[mM]\.?)?")
+_STATA_TIME_ONLY = re.compile(
+    r"[Hh]{1,2}(:[Mm]{2})?(:[Ss]{2}(\.s+)?)?(\s*[aApP]\.?[mM]\.?)?"
+)
 
 
 def classify(file_format: FileFormat, fmt: str | None) -> TemporalKind | None:
@@ -102,7 +104,9 @@ def classify(file_format: FileFormat, fmt: str | None) -> TemporalKind | None:
         t.assert_never(file_format)
 
 
-def _to_int64(arr: pa.Array | pa.ChunkedArray, scale: float) -> pa.Array | pa.ChunkedArray:
+def _to_int64(
+    arr: pa.Array | pa.ChunkedArray, scale: float
+) -> pa.Array | pa.ChunkedArray:
     """``round(arr * scale)`` as int64, propagating nulls."""
     if scale != 1:
         arr = pc.multiply(pc.cast(arr, pa.float64()), scale)
@@ -145,7 +149,9 @@ def convert(
         limit = 86_400_000_000
         # Extract fractional part (time-of-day) by modulo 24h to match pyreadstat behavior.
         # For SPSS TIME format, this extracts the time-of-day regardless of day component.
-        micros = pc.subtract(micros, pc.multiply(pc.floor(pc.divide(micros, limit)), limit))
+        micros = pc.subtract(
+            micros, pc.multiply(pc.floor(pc.divide(micros, limit)), limit)
+        )
         micros = pc.cast(micros, pa.int64(), safe=False)
         return pc.cast(micros, pa.time64("us"))
 
@@ -160,7 +166,12 @@ def convert(
 # The display format each kind is written with. ``None`` means no format: Stata has nothing that
 # denotes elapsed time
 DEFAULT_FORMAT: FormatMap[TemporalMap[str | None]] = {
-    "sav": {"date": "DATE11", "datetime": "DATETIME20", "time": "TIME8", "duration": "DTIME11"},
+    "sav": {
+        "date": "DATE11",
+        "datetime": "DATETIME20",
+        "time": "TIME8",
+        "duration": "DTIME11",
+    },
     "dta": {"date": "%td", "datetime": "%tc", "time": "%tcHH:MM:SS", "duration": None},
 }
 
@@ -199,7 +210,9 @@ def to_raw(arr: pa.Array, file_format: FileFormat, kind: TemporalKind) -> pa.Arr
 
     if kind == "datetime":
         unit_type = (
-            pa.timestamp("us", tz=arr.type.tz) if pa.types.is_timestamp(arr.type) else pa.timestamp("us")
+            pa.timestamp("us", tz=arr.type.tz)
+            if pa.types.is_timestamp(arr.type)
+            else pa.timestamp("us")
         )
         micros = pc.cast(pc.cast(arr, unit_type), pa.int64())
         micros = pc.add(micros, epoch_days * 86_400_000_000)

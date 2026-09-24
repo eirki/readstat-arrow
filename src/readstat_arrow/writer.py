@@ -147,8 +147,18 @@ _DEFAULT_STRING_WIDTH: FormatMap[int] = {"sav": 255, "dta": 244}
 # The kind each temporal column is stored as: a Stata date is a whole number of days,
 # everything else a double (and every SPSS numeric is a double in the first place).
 _TEMPORAL_KIND: FormatMap[_dates.TemporalMap[int]] = {
-    "sav": {"date": _K_DOUBLE, "datetime": _K_DOUBLE, "time": _K_DOUBLE, "duration": _K_DOUBLE},
-    "dta": {"date": _K_INT32, "datetime": _K_DOUBLE, "time": _K_DOUBLE, "duration": _K_DOUBLE},
+    "sav": {
+        "date": _K_DOUBLE,
+        "datetime": _K_DOUBLE,
+        "time": _K_DOUBLE,
+        "duration": _K_DOUBLE,
+    },
+    "dta": {
+        "date": _K_INT32,
+        "datetime": _K_DOUBLE,
+        "time": _K_DOUBLE,
+        "duration": _K_DOUBLE,
+    },
 }
 
 # Stata's native numeric types; everything else is widened or stored as double.
@@ -193,7 +203,9 @@ class _Writer:
         self.renamed_variables: dict[str, str] = {}
         if rename_invalid_names:
             renames = _sanitised_names(schema.names, self._file_format)
-            self.renamed_variables = {old: new for old, new in renames.items() if old != new}
+            self.renamed_variables = {
+                old: new for old, new in renames.items() if old != new
+            }
             for old, new in self.renamed_variables.items():
                 metadata = metadata.rename_variable(old, new)
             written = pa.schema([f.with_name(renames[f.name]) for f in schema])
@@ -203,7 +215,11 @@ class _Writer:
         ranges = variable_ranges or {}
         self._plans = [
             _ColumnPlan.build(
-                field, metadata, self._file_format, ranges.get(original), on_text_limits_exceeded
+                field,
+                metadata,
+                self._file_format,
+                ranges.get(original),
+                on_text_limits_exceeded,
             )
             for original, field in zip(schema.names, written, strict=True)
         ]
@@ -234,7 +250,9 @@ class _Writer:
 
         if isinstance(where, str | os.PathLike):
             path = os.fspath(where)
-            self._file: t.IO[bytes] = open(os.path.expanduser(path), "wb")  # noqa: SIM115 - closed in close()
+            self._file: t.IO[bytes] = open(
+                os.path.expanduser(path), "wb"
+            )  # noqa: SIM115 - closed in close()
             self._owns_file = True
         else:
             self._file = where
@@ -271,7 +289,9 @@ class _Writer:
                 f"--- expected ---\n{self.schema}"
             )
         prepared = [plan.prepare(batch.column(i)) for i, plan in enumerate(self._plans)]
-        self._impl.write([values for values, _ in prepared], [tags for _, tags in prepared])
+        self._impl.write(
+            [values for values, _ in prepared], [tags for _, tags in prepared]
+        )
 
     @property
     def rows_written(self) -> int:
@@ -294,16 +314,23 @@ class _Writer:
         return self
 
     def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ) -> None:
         if exc_type is None:
             self.close()
-        elif self._owns_file:  # writing failed: don't leave a truncated file that looks finished
+        elif (
+            self._owns_file
+        ):  # writing failed: don't leave a truncated file that looks finished
             self._closed = True
             self._file.close()
 
     def __del__(self) -> None:
-        if getattr(self, "_owns_file", False) and not getattr(self, "_closed", True):  # pragma: no cover
+        if getattr(self, "_owns_file", False) and not getattr(
+            self, "_closed", True
+        ):  # pragma: no cover
             self._file.close()
 
 
@@ -436,7 +463,13 @@ class DtaWriter(_Writer):
         on_text_limits_exceeded: TextLimitPolicy = "error",
     ) -> None:
         super().__init__(
-            where, schema, num_rows, metadata, variable_ranges, rename_invalid_names, on_text_limits_exceeded
+            where,
+            schema,
+            num_rows,
+            metadata,
+            variable_ranges,
+            rename_invalid_names,
+            on_text_limits_exceeded,
         )
 
 
@@ -535,7 +568,9 @@ def write_dta(
 # ---------------------------------------------------------------------------
 
 
-def _numeric_kind(file_format: FileFormat, typ: pa.DataType, value_range: tuple[int, int] | None) -> int:
+def _numeric_kind(
+    file_format: FileFormat, typ: pa.DataType, value_range: tuple[int, int] | None
+) -> int:
     """The writer kind a numeric (or boolean, or null) column is stored as.
 
     ``value_range`` is the column's actual minimum and maximum, when the data is in
@@ -636,13 +671,19 @@ class _ColumnPlan:
         ):
             kind = _numeric_kind(file_format, typ, value_range)
             if fmt is None:
-                fmt = _default_numeric_format(file_format, typ, metadata.display_widths.get(name))
+                fmt = _default_numeric_format(
+                    file_format, typ, metadata.display_widths.get(name)
+                )
         else:
-            raise TypeError(f"column {field.name!r}: cannot write Arrow type {typ} to a {file_format} file")
+            raise TypeError(
+                f"column {field.name!r}: cannot write Arrow type {typ} to a {file_format} file"
+            )
 
         storage_width = 8
         if kind == _K_STRING:
-            declared = metadata.storage_widths.get(name) or _DEFAULT_STRING_WIDTH[file_format]
+            declared = (
+                metadata.storage_widths.get(name) or _DEFAULT_STRING_WIDTH[file_format]
+            )
             storage_width = max(declared, 1)
             widest = _LIMITS[file_format]["string value"].max_bytes
             if storage_width > widest:
@@ -651,9 +692,13 @@ class _ColumnPlan:
                     f"{DISPLAY_NAME[file_format]} strings stop at {widest}"
                 )
                 if on_text_limits_exceeded == "error":
-                    raise ValueError(f"{too_wide}. Pass on_text_limits_exceeded='truncate' to cut the values")
+                    raise ValueError(
+                        f"{too_wide}. Pass on_text_limits_exceeded='truncate' to cut the values"
+                    )
                 warnings.warn(  # build -> _Writer.__init__ -> SavWriter/DtaWriter -> caller
-                    f"{too_wide}, values truncated to {widest}", ReadstatWarning, stacklevel=4
+                    f"{too_wide}, values truncated to {widest}",
+                    ReadstatWarning,
+                    stacklevel=4,
                 )
                 storage_width = widest
 
@@ -664,16 +709,28 @@ class _ColumnPlan:
                     f"column {field.name!r}: {DISPLAY_NAME[file_format]} files cannot store "
                     "SPSS user-defined missing values"
                 )
-            if kind == _K_STRING and not all(isinstance(v, str) for v in [*discrete, *(span or ())]):
+            if kind == _K_STRING and not all(
+                isinstance(v, str) for v in [*discrete, *(span or ())]
+            ):
                 raise ValueError(
                     f"column {field.name!r}: missing values of a string variable must be strings"
                 )
 
         if kind == _K_STRING and tagged:
-            raise ValueError(f"column {field.name!r}: only numeric variables can have tagged missing values")
+            raise ValueError(
+                f"column {field.name!r}: only numeric variables can have tagged missing values"
+            )
 
         return cls(
-            name, kind, metadata, temporal, storage_width, fmt, file_format, tagged, on_text_limits_exceeded
+            name,
+            kind,
+            metadata,
+            temporal,
+            storage_width,
+            fmt,
+            file_format,
+            tagged,
+            on_text_limits_exceeded,
         )
 
     def prepare(self, array: pa.Array) -> tuple[pa.Array, pa.Array | None]:
@@ -715,9 +772,12 @@ class _ColumnPlan:
             "label_set": label_set,
             "measure": _MEASURE[metadata.measures.get(name) or "unknown"],
             "alignment": _ALIGNMENT[metadata.alignments.get(name) or "unknown"],
-            "display_width": metadata.display_widths.get(name) or 0,  # 0 lets ReadStat pick a width
+            "display_width": metadata.display_widths.get(name)
+            or 0,  # 0 lets ReadStat pick a width
             "missing_values": [_numeric_or_str(x) for x in discrete],
-            "missing_ranges": [] if span is None else [tuple(_numeric_or_str(x) for x in span)],
+            "missing_ranges": (
+                [] if span is None else [tuple(_numeric_or_str(x) for x in span)]
+            ),
         }
 
 
@@ -734,7 +794,21 @@ _NAME_RULES: FormatMap[dict[str, t.Any]] = {
         "first": "@",
         "max_chars": 64,
         "reserved": frozenset(
-            {"all", "and", "by", "eq", "ge", "gt", "le", "lt", "ne", "not", "or", "to", "with"}
+            {
+                "all",
+                "and",
+                "by",
+                "eq",
+                "ge",
+                "gt",
+                "le",
+                "lt",
+                "ne",
+                "not",
+                "or",
+                "to",
+                "with",
+            }
         ),
         "reserved_prefix": None,
     },
@@ -789,7 +863,11 @@ def _sanitised_names(names: Sequence[str], file_format: FileFormat) -> dict[str,
             renames[name] = name
             continue
         clean = "".join(c if _name_char_ok(c, rules["extra"]) else "_" for c in name)
-        if not clean or not _name_start_ok(clean[0], rules["first"]) or _reserved_prefix(clean, rules):
+        if (
+            not clean
+            or not _name_start_ok(clean[0], rules["first"])
+            or _reserved_prefix(clean, rules)
+        ):
             clean = "v" + clean
         if clean.lower() in rules["reserved"]:
             clean += "_"
@@ -834,7 +912,11 @@ def _name_char_ok(char: str, extra: str) -> bool:
 
 def _is_tag_struct(typ: pa.DataType) -> bool:
     """``struct<value: ..., tag: ...>`` as produced by ``read_dta(..., preserve_user_missing=True)``."""
-    return pa.types.is_struct(typ) and typ.num_fields == 2 and [f.name for f in typ] == ["value", "tag"]
+    return (
+        pa.types.is_struct(typ)
+        and typ.num_fields == 2
+        and [f.name for f in typ] == ["value", "tag"]
+    )
 
 
 def _struct_values(array: pa.Array) -> pa.Array:
@@ -854,16 +936,26 @@ def _tag_codes(array: pa.Array, name: str) -> pa.Array:
     tags = pc.cast(tags, pa.string())
     if array.null_count:  # a null struct is a plain '.', whatever the tag field says
         tags = pc.if_else(array.is_null(), pa.scalar(None, pa.string()), tags)
-    if pc.any(pc.and_(tags.is_valid(), pc.struct_field(array, "value").is_valid())).as_py():
-        raise ValueError(f"column {name!r}: a cell cannot have both a value and a missing-value tag")
-    positions = pc.index_in(tags, value_set=_TAG_LETTERS)  # 'a' -> 0 ... 'z' -> 25, unknown -> null
+    if pc.any(
+        pc.and_(tags.is_valid(), pc.struct_field(array, "value").is_valid())
+    ).as_py():
+        raise ValueError(
+            f"column {name!r}: a cell cannot have both a value and a missing-value tag"
+        )
+    positions = pc.index_in(
+        tags, value_set=_TAG_LETTERS
+    )  # 'a' -> 0 ... 'z' -> 25, unknown -> null
     if pc.any(pc.and_(tags.is_valid(), positions.is_null())).as_py():
-        raise ValueError(f"column {name!r}: missing-value tags must be single letters a-z")
+        raise ValueError(
+            f"column {name!r}: missing-value tags must be single letters a-z"
+        )
     return pc.cast(pc.add(positions, 1), pa.int8())
 
 
 def _plan_label_sets(
-    plans: list[_ColumnPlan], file_format: FileFormat, on_text_limits_exceeded: TextLimitPolicy
+    plans: list[_ColumnPlan],
+    file_format: FileFormat,
+    on_text_limits_exceeded: TextLimitPolicy,
 ) -> tuple[list[dict[str, t.Any]], dict[str, str]]:
     """Turn ``Metadata.value_labels`` into ReadStat label sets.
 
@@ -875,13 +967,18 @@ def _plan_label_sets(
     set_name_for_variable: dict[str, str] = {}
     set_name_for_codes: dict[tuple[tuple[Value, str], ...], str] = {}
     for plan in plans:
-        codes = tuple((c["value"], c["label"]) for c in plan.metadata.value_labels.get(plan.name) or [])
+        codes = tuple(
+            (c["value"], c["label"])
+            for c in plan.metadata.value_labels.get(plan.name) or []
+        )
         if not codes:
             continue
         set_name = set_name_for_codes.get(codes)
         if set_name is None:
             set_name = set_name_for_codes[codes] = plan.name
-            specs.append(_label_set_spec(set_name, codes, file_format, on_text_limits_exceeded))
+            specs.append(
+                _label_set_spec(set_name, codes, file_format, on_text_limits_exceeded)
+            )
         set_name_for_variable[plan.name] = set_name
     return specs, set_name_for_variable
 
@@ -912,8 +1009,15 @@ def _label_set_spec(
         elif all(isinstance(v, int | float) for v in values):
             kind = _K_DOUBLE
         else:
-            raise ValueError(f"variable {name!r}: code list mixes string and numeric values")
-        return {"name": name, "kind": kind, "labels": list(zip(values, texts, strict=True)), "tags": []}
+            raise ValueError(
+                f"variable {name!r}: code list mixes string and numeric values"
+            )
+        return {
+            "name": name,
+            "kind": kind,
+            "labels": list(zip(values, texts, strict=True)),
+            "tags": [],
+        }
     elif file_format == "dta":
         labels: list[tuple[int, str]] = []
         tags: list[tuple[str, str]] = []
@@ -922,9 +1026,13 @@ def _label_set_spec(
                 if len(value) == 1 and "a" <= value <= "z":
                     tags.append((value, text))
                 else:
-                    raise ValueError(f"variable {name!r}: Stata cannot label string value {value!r}")
+                    raise ValueError(
+                        f"variable {name!r}: Stata cannot label string value {value!r}"
+                    )
             elif not float(value).is_integer():
-                raise ValueError(f"variable {name!r}: Stata can only label integer values, got {value!r}")
+                raise ValueError(
+                    f"variable {name!r}: Stata can only label integer values, got {value!r}"
+                )
             elif not _LABEL_KEY_MIN <= value <= _LABEL_KEY_MAX:
                 raise ValueError(
                     f"variable {name!r}: Stata can only label values a long can hold "
@@ -946,7 +1054,9 @@ def _reject_duplicate_keys(name: str, keys: Sequence[Value]) -> None:
     seen: set[Value] = set()
     for key in keys:
         if key in seen:
-            raise ValueError(f"variable {name!r}: Stata cannot label value {key!r} more than once")
+            raise ValueError(
+                f"variable {name!r}: Stata cannot label value {key!r} more than once"
+            )
         seen.add(key)
 
 
@@ -987,9 +1097,13 @@ def _fit(
         f"{DISPLAY_NAME[file_format]} allows {limit}"
     )
     if on_text_limits_exceeded == "error":
-        raise ValueError(f"{too_long}. Pass on_text_limits_exceeded='truncate' to cut it instead")
+        raise ValueError(
+            f"{too_long}. Pass on_text_limits_exceeded='truncate' to cut it instead"
+        )
     fitted = _cut(text, limit)
-    warnings.warn(f"{too_long}, truncated to {fitted!r}", ReadstatWarning, stacklevel=stacklevel)
+    warnings.warn(
+        f"{too_long}, truncated to {fitted!r}", ReadstatWarning, stacklevel=stacklevel
+    )
     return fitted
 
 
@@ -1024,7 +1138,9 @@ def _cut(text: str, limit: _Limit) -> str:
     return encoded[: limit.max_bytes].decode("utf-8", "ignore")
 
 
-def _missing_parts(missing: Missingness | None, name: str) -> tuple[list[Value], tuple[Value, Value] | None]:
+def _missing_parts(
+    missing: Missingness | None, name: str
+) -> tuple[list[Value], tuple[Value, Value] | None]:
     """The discrete values and the range a variable declares missing, in whichever form.
 
     Also the only place the two shapes are validated, since a ``TypedDict`` is an
@@ -1032,7 +1148,9 @@ def _missing_parts(missing: Missingness | None, name: str) -> tuple[list[Value],
     """
     if missing is None:
         return [], None
-    spec = t.cast(Mapping[str, t.Any], missing)  # which keys exist is exactly what we are asking
+    spec = t.cast(
+        Mapping[str, t.Any], missing
+    )  # which keys exist is exactly what we are asking
     if "values" in spec:
         values = spec["values"]
         if len(values) > 3:
@@ -1073,7 +1191,8 @@ def _stata_int_type(arrow_type: pa.DataType, lo: int, hi: int) -> pa.DataType | 
     kind = _DTA_KIND.get(arrow_type)
     if kind is None:
         return None
-    candidates = _STATA_INT_RANGES[kind - _K_INT8 :]  # kinds are ordered byte, int, long
+    # kinds are ordered byte, int, long
+    candidates = _STATA_INT_RANGES[kind - _K_INT8 :]
     return next(
         (typ for typ, lo_ok, hi_ok in candidates if lo_ok <= lo and hi <= hi_ok),
         pa.float64(),
@@ -1109,7 +1228,10 @@ def _widen_for_stata(table: pa.Table) -> pa.Table:
         if tagged:
             struct = column.combine_chunks()
             widened = pa.StructArray.from_arrays(
-                [pc.cast(values, target).combine_chunks(), pc.struct_field(struct, "tag")],
+                [
+                    pc.cast(values, target).combine_chunks(),
+                    pc.struct_field(struct, "tag"),
+                ],
                 names=["value", "tag"],
                 mask=struct.is_null(),
             )

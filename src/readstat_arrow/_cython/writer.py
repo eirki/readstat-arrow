@@ -126,7 +126,9 @@ class _Sink:
 
 @cython.cfunc
 @cython.exceptval(check=False)
-def _data_writer(data: cython.p_const_void, length: cython.size_t, vctx: cython.p_void) -> cython.ssize_t:
+def _data_writer(
+    data: cython.p_const_void, length: cython.size_t, vctx: cython.p_void
+) -> cython.ssize_t:
     sink: _Sink = cython.cast(_Sink, vctx)
     try:
         chunk: bytes = cython.cast(cython.p_char, data)[:length]
@@ -203,7 +205,9 @@ class _Column:
         if self.has_tags:
             self.tag_offset = tags.offset
             tag_buffers = tags.buffers()
-            self.tag_valid = _ptr(tag_buffers[0]) if tags.null_count > 0 else cython.NULL
+            self.tag_valid = (
+                _ptr(tag_buffers[0]) if tags.null_count > 0 else cython.NULL
+            )
             self.tag_codes = cython.cast(cython.p_const_schar, _ptr(tag_buffers[1]))
 
         self._array = array
@@ -216,7 +220,11 @@ class _Column:
             return
         buffers = array.buffers()
         validity = buffers[0]
-        self.valid = _ptr(validity) if (validity is not None and array.null_count > 0) else cython.NULL
+        self.valid = (
+            _ptr(validity)
+            if (validity is not None and array.null_count > 0)
+            else cython.NULL
+        )
         if self.kind == K_STRING:
             self.large_offsets = pa.types.is_large_string(array.type)
             if self.large_offsets:
@@ -252,7 +260,9 @@ class _Column:
         if not self.has_tags:
             return 0
         j: cython.Py_ssize_t = self.tag_offset + i
-        if self.tag_valid is not cython.NULL and not (self.tag_valid[j >> 3] & (1 << (j & 7))):
+        if self.tag_valid is not cython.NULL and not (
+            self.tag_valid[j >> 3] & (1 << (j & 7))
+        ):
             return 0
         return cython.cast(cython.char, 96 + self.tag_codes[j])  # 1 -> 'a'
 
@@ -343,7 +353,9 @@ class Writer:
         sets: dict = {}
         ls: cython.pointer(readstat_label_set_t)
         for spec in label_sets:
-            ls = readstat_add_label_set(w, _READSTAT_TYPE[spec["kind"]], _c_str(spec["name"]))
+            ls = readstat_add_label_set(
+                w, _READSTAT_TYPE[spec["kind"]], _c_str(spec["name"])
+            )
             for code, label in spec["labels"]:
                 c_label: bytes = _c_str(label)
                 if spec["kind"] == K_STRING:
@@ -361,7 +373,10 @@ class Writer:
         for spec in columns:
             col: _Column = _Column(spec["name"], spec["kind"])
             var = readstat_add_variable(
-                w, _c_str(spec["name"]), _READSTAT_TYPE[spec["kind"]], spec["storage_width"]
+                w,
+                _c_str(spec["name"]),
+                _READSTAT_TYPE[spec["kind"]],
+                spec["storage_width"],
             )
             col.variable = var
             if spec["label"] is not None:
@@ -374,26 +389,44 @@ class Writer:
                     var, cython.cast(cython.pointer(readstat_label_set_t), ls_addr)
                 )
             readstat_variable_set_measure(
-                var, cython.cast(readstat_measure_t, cython.cast(cython.int, spec["measure"]))
+                var,
+                cython.cast(
+                    readstat_measure_t, cython.cast(cython.int, spec["measure"])
+                ),
             )
             readstat_variable_set_alignment(
-                var, cython.cast(readstat_alignment_t, cython.cast(cython.int, spec["alignment"]))
+                var,
+                cython.cast(
+                    readstat_alignment_t, cython.cast(cython.int, spec["alignment"])
+                ),
             )
             if spec["display_width"]:
                 readstat_variable_set_display_width(var, spec["display_width"])
             for value in spec["missing_values"]:
                 if spec["kind"] == K_STRING:
                     c_value: bytes = self._keep(value)
-                    _check(readstat_variable_add_missing_string_value(var, c_value), spec["name"])
+                    _check(
+                        readstat_variable_add_missing_string_value(var, c_value),
+                        spec["name"],
+                    )
                 else:
-                    _check(readstat_variable_add_missing_double_value(var, value), spec["name"])
+                    _check(
+                        readstat_variable_add_missing_double_value(var, value),
+                        spec["name"],
+                    )
             for lo, hi in spec["missing_ranges"]:
                 if spec["kind"] == K_STRING:
                     c_lo: bytes = self._keep(lo)
                     c_hi: bytes = self._keep(hi)
-                    _check(readstat_variable_add_missing_string_range(var, c_lo, c_hi), spec["name"])
+                    _check(
+                        readstat_variable_add_missing_string_range(var, c_lo, c_hi),
+                        spec["name"],
+                    )
                 else:
-                    _check(readstat_variable_add_missing_double_range(var, lo, hi), spec["name"])
+                    _check(
+                        readstat_variable_add_missing_double_range(var, lo, hi),
+                        spec["name"],
+                    )
             self._columns.append(col)
 
         # -- file-level metadata and header --------------------------------
@@ -467,7 +500,12 @@ class Writer:
                 # ReadStat emits the header (and validates variable names etc.) on the
                 # very first begin_row, so an error there is about definitions, not data.
                 _check(
-                    rc, "writing header" if self._rows_written + i == 0 else f"row {self._rows_written + i}"
+                    rc,
+                    (
+                        "writing header"
+                        if self._rows_written + i == 0
+                        else f"row {self._rows_written + i}"
+                    ),
                 )
             for c in range(n_cols):
                 col = cython.cast(_Column, cols[c])
@@ -481,20 +519,32 @@ class Writer:
                     k = col.kind
                     if k == K_DOUBLE:
                         v = col.f64[col.offset + i]
-                        if v != v:  # NaN: write as (system) missing rather than a raw NaN
+                        if (
+                            v != v
+                        ):  # NaN: write as (system) missing rather than a raw NaN
                             rc = readstat_insert_missing_value(w, col.variable)
                         else:
                             rc = readstat_insert_double_value(w, col.variable, v)
                     elif k == K_STRING:
-                        rc = readstat_insert_string_value(w, col.variable, col.string_at(i))
+                        rc = readstat_insert_string_value(
+                            w, col.variable, col.string_at(i)
+                        )
                     elif k == K_INT8:
-                        rc = readstat_insert_int8_value(w, col.variable, col.i8[col.offset + i])
+                        rc = readstat_insert_int8_value(
+                            w, col.variable, col.i8[col.offset + i]
+                        )
                     elif k == K_INT16:
-                        rc = readstat_insert_int16_value(w, col.variable, col.i16[col.offset + i])
+                        rc = readstat_insert_int16_value(
+                            w, col.variable, col.i16[col.offset + i]
+                        )
                     elif k == K_INT32:
-                        rc = readstat_insert_int32_value(w, col.variable, col.i32[col.offset + i])
+                        rc = readstat_insert_int32_value(
+                            w, col.variable, col.i32[col.offset + i]
+                        )
                     else:
-                        rc = readstat_insert_float_value(w, col.variable, col.f32[col.offset + i])
+                        rc = readstat_insert_float_value(
+                            w, col.variable, col.f32[col.offset + i]
+                        )
                 if rc != READSTAT_OK:
                     _check(rc, f"column {col.name!r}, row {self._rows_written + i}")
             _check(readstat_end_row(w), f"row {self._rows_written + i}")

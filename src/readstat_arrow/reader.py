@@ -386,7 +386,9 @@ class _StreamingReader:
         self.read_batches(batches.append)
         return pa.Table.from_batches(batches, self.schema)
 
-    def _to_batch(self, arrays: list[pa.Array], tags: list[pa.Array | None]) -> pa.RecordBatch:
+    def _to_batch(
+        self, arrays: list[pa.Array], tags: list[pa.Array | None]
+    ) -> pa.RecordBatch:
         """One batch's raw columns, converted exactly as :func:`_read_data` converts a table.
 
         ``from_arrays`` against ``_read_schema`` is also the check that the
@@ -437,7 +439,9 @@ def _open(
     names = None if columns is None else list(columns)
 
     with _rewound(file):
-        stored_schema, metadata, num_rows, messages = _metadata_pass(path, file, file_format, encoding)
+        stored_schema, metadata, num_rows, messages = _metadata_pass(
+            path, file, file_format, encoding
+        )
     _emit_warnings(messages)
     metadata = _for_columns(metadata, names)
 
@@ -446,7 +450,14 @@ def _open(
         # Another pass of its own: the types every batch is read into have to be
         # settled before the first of them is.
         types = _scanned_types(
-            path, file, file_format, columns, row_limit, row_offset, encoding, preserve_user_missing
+            path,
+            file,
+            file_format,
+            columns,
+            row_limit,
+            row_offset,
+            encoding,
+            preserve_user_missing,
         )
 
     metadata = _int_value_labels(metadata, types)
@@ -488,11 +499,15 @@ def _selected_schema(
     """
     fields = [field_ for field_ in stored if columns is None or field_.name in columns]
     if types is not None:
-        fields = [field_.with_type(types.get(field_.name, field_.type)) for field_ in fields]
+        fields = [
+            field_.with_type(types.get(field_.name, field_.type)) for field_ in fields
+        ]
     return pa.schema(fields)
 
 
-def _int_value_labels(metadata: Metadata, types: dict[str, pa.DataType] | None) -> Metadata:
+def _int_value_labels(
+    metadata: Metadata, types: dict[str, pa.DataType] | None
+) -> Metadata:
     """Retype the codes of any column a scan narrowed to an integer type.
 
     A .sav stores every numeric value as a double, so its value labels arrive as
@@ -507,9 +522,11 @@ def _int_value_labels(metadata: Metadata, types: dict[str, pa.DataType] | None) 
         if codes is None or not pa.types.is_integer(types.get(name, pa.float64())):
             continue
         labels[name] = [
-            {**code, "value": int(code["value"])}
-            if isinstance(code["value"], float) and code["value"].is_integer()
-            else code
+            (
+                {**code, "value": int(code["value"])}
+                if isinstance(code["value"], float) and code["value"].is_integer()
+                else code
+            )
             for code in codes
         ]
         changed = True
@@ -527,7 +544,11 @@ def _for_columns(metadata: Metadata, columns: list[str] | None) -> Metadata:
         return metadata
     selected = frozenset(columns)
     kept: dict[str, t.Any] = {
-        field_name: {name: value for name, value in getattr(metadata, field_name).items() if name in selected}
+        field_name: {
+            name: value
+            for name, value in getattr(metadata, field_name).items()
+            if name in selected
+        }
         for field_name in PER_VARIABLE
     }
     return replace(metadata, **kept)
@@ -547,7 +568,14 @@ def _read_data(
     types = None
     if scan_and_narrow_types:
         types = _scanned_types(
-            path, file, file_format, columns, row_limit, row_offset, encoding, preserve_user_missing
+            path,
+            file,
+            file_format,
+            columns,
+            row_limit,
+            row_offset,
+            encoding,
+            preserve_user_missing,
         )
     arrays, tags, table_schema, metadata, _, messages, _ = _parser.parse(
         path,
@@ -576,13 +604,18 @@ def _read_metadata(
     where: PathLike | t.IO[bytes], file_format: FileFormat, encoding: str | None
 ) -> tuple[pa.Schema, int | None, Metadata]:
     path, file = _source(where)
-    schema, metadata, num_rows, messages = _metadata_pass(path, file, file_format, encoding)
+    schema, metadata, num_rows, messages = _metadata_pass(
+        path, file, file_format, encoding
+    )
     _emit_warnings(messages)
     return _convert_date_types(schema, metadata, file_format), num_rows, metadata
 
 
 def _metadata_pass(
-    path: bytes | None, file: t.IO[bytes] | None, file_format: FileFormat, encoding: str | None
+    path: bytes | None,
+    file: t.IO[bytes] | None,
+    file_format: FileFormat,
+    encoding: str | None,
 ) -> tuple[pa.Schema, Metadata, int | None, list[str]]:
     """Returns the variables as the file stores them - before any column selection,
     narrowing or date conversion - along with the metadata, the header's row
@@ -641,7 +674,11 @@ def _scanned_types(
             preserve_user_missing=preserve_user_missing,
         )
     narrowed = ((summary, _narrow_type(summary)) for summary in summaries)
-    return {summary["name"]: narrow for summary, narrow in narrowed if narrow != summary["type"]}
+    return {
+        summary["name"]: narrow
+        for summary, narrow in narrowed
+        if narrow != summary["type"]
+    }
 
 
 def _narrow_type(summary: dict[str, t.Any]) -> pa.DataType:
@@ -668,7 +705,9 @@ def _narrow_type(summary: dict[str, t.Any]) -> pa.DataType:
     return pa.float64()
 
 
-_SPSS_STRING_FORMAT = re.compile(r"A(\d+)$")  # "A20"; AHEX counts hex digits, so it is left alone
+_SPSS_STRING_FORMAT = re.compile(
+    r"A(\d+)$"
+)  # "A20"; AHEX counts hex digits, so it is left alone
 _STATA_STRING_FORMAT = re.compile(r"%-?\d+s$")  # "%20s", "%-20s"
 
 
@@ -683,7 +722,11 @@ def _normalise_widths(metadata: Metadata, file_format: FileFormat) -> Metadata:
     to write the file again. Numeric variables already report their real size.
     """
     widths: dict[str, int | None] = {
-        name: None if width is None else _declared_width(metadata.formats.get(name), width, file_format)
+        name: (
+            None
+            if width is None
+            else _declared_width(metadata.formats.get(name), width, file_format)
+        )
         for name, width in metadata.storage_widths.items()
     }
     return replace(metadata, storage_widths=widths)
@@ -708,12 +751,16 @@ def _with_tag_structs(table: pa.Table, tags: list[pa.Array | None]) -> pa.Table:
         column = table.column(i)
         if pa.types.is_string(column.type) or pa.types.is_large_string(column.type):
             continue  # Stata strings cannot be missing, tagged or otherwise
-        values = column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+        values = (
+            column.combine_chunks() if isinstance(column, pa.ChunkedArray) else column
+        )
         if tag_array is None:
             tag_array = pa.nulls(len(values), TAG_TYPE)
         # The struct itself is null only for the plain '.', so null_count keeps meaning "missing".
         struct = pa.StructArray.from_arrays(
-            [values, tag_array], names=["value", "tag"], mask=pc.and_(values.is_null(), tag_array.is_null())
+            [values, tag_array],
+            names=["value", "tag"],
+            mask=pc.and_(values.is_null(), tag_array.is_null()),
         )
         table = table.set_column(i, table.column_names[i], struct)
     return table
@@ -727,9 +774,13 @@ def _tag_struct_schema(schema: pa.Schema) -> pa.Schema:
     numeric, which is every column that is not a string.
     """
     fields = [
-        field_
-        if pa.types.is_string(field_.type) or pa.types.is_large_string(field_.type)
-        else field_.with_type(pa.struct([("value", field_.type), ("tag", TAG_TYPE)]))
+        (
+            field_
+            if pa.types.is_string(field_.type) or pa.types.is_large_string(field_.type)
+            else field_.with_type(
+                pa.struct([("value", field_.type), ("tag", TAG_TYPE)])
+            )
+        )
         for field_ in schema
     ]
     return pa.schema(fields)
@@ -742,10 +793,14 @@ def _emit_warnings(messages: list[str]) -> None:
         warnings.warn(message, ReadstatWarning, stacklevel=4)
 
 
-def _convert_date_types(schema: pa.Schema, metadata: Metadata, file_format: FileFormat) -> pa.Schema:
+def _convert_date_types(
+    schema: pa.Schema, metadata: Metadata, file_format: FileFormat
+) -> pa.Schema:
     """Retype the fields :func:`_convert_dates` would convert, without touching any data."""
     for i, field_ in enumerate(schema):
-        if not pa.types.is_floating(field_.type) and not pa.types.is_integer(field_.type):
+        if not pa.types.is_floating(field_.type) and not pa.types.is_integer(
+            field_.type
+        ):
             continue
         kind = _dates.classify(file_format, metadata.formats.get(field_.name))
         if kind is not None:
@@ -753,13 +808,19 @@ def _convert_date_types(schema: pa.Schema, metadata: Metadata, file_format: File
     return schema
 
 
-def _convert_dates(table: pa.Table, metadata: Metadata, file_format: FileFormat) -> pa.Table:
+def _convert_dates(
+    table: pa.Table, metadata: Metadata, file_format: FileFormat
+) -> pa.Table:
     for i, name in enumerate(table.column_names):
-        if not pa.types.is_floating(table.column(i).type) and not pa.types.is_integer(table.column(i).type):
+        if not pa.types.is_floating(table.column(i).type) and not pa.types.is_integer(
+            table.column(i).type
+        ):
             continue
         kind = _dates.classify(file_format, metadata.formats.get(name))
         if kind is not None:
-            table = table.set_column(i, name, _dates.convert(table.column(i), file_format, kind))
+            table = table.set_column(
+                i, name, _dates.convert(table.column(i), file_format, kind)
+            )
     return table
 
 
@@ -774,7 +835,9 @@ def _source(where: PathLike | t.IO[bytes]) -> tuple[bytes | None, t.IO[bytes] | 
         return _fs_path(where), None
     seekable = getattr(where, "seekable", None)
     if seekable is not None and not seekable():
-        raise ValueError("file object is not seekable; read it into io.BytesIO, or pass a path instead")
+        raise ValueError(
+            "file object is not seekable; read it into io.BytesIO, or pass a path instead"
+        )
     return None, where
 
 

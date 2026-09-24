@@ -4,9 +4,10 @@
 # Reader and writer subsets of the API, in that order. SAS and SPSS-portable
 # functions are left out until they are needed.
 
+from posix.types cimport off_t
+
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t
 from libc.time cimport time_t
-from posix.types cimport off_t
 
 
 cdef extern from "readstat.h":

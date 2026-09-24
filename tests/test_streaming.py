@@ -23,7 +23,9 @@ from readstat_arrow._formats import FileFormat
 SAMPLE_ROWS = 5
 
 
-def read_whole(fmt: FileFormat, **kwargs: t.Any) -> tuple[pa.Table, readstat_arrow.Metadata]:
+def read_whole(
+    fmt: FileFormat, **kwargs: t.Any
+) -> tuple[pa.Table, readstat_arrow.Metadata]:
     return READER_FUNCS[fmt](SAMPLES[fmt], **kwargs)
 
 
@@ -31,7 +33,9 @@ def batches_of(fmt: FileFormat, **sizing: int) -> list[pa.RecordBatch]:
     """Every batch of a streamed read, and the reader's own schema checked against each."""
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt])
     collected: list[pa.RecordBatch] = []
-    assert reader.read_batches(collected.append, **sizing) == sum(b.num_rows for b in collected)
+    assert reader.read_batches(collected.append, **sizing) == sum(
+        b.num_rows for b in collected
+    )
     assert all(batch.schema.equals(reader.schema) for batch in collected)
     return collected
 
@@ -42,7 +46,9 @@ def batches_of(fmt: FileFormat, **sizing: int) -> list[pa.RecordBatch]:
 
 
 @pytest.mark.parametrize("batch_rows", [1, 2, 4, SAMPLE_ROWS, 1000])
-def test_batches_reassemble_into_the_whole_table(fmt: FileFormat, batch_rows: int) -> None:
+def test_batches_reassemble_into_the_whole_table(
+    fmt: FileFormat, batch_rows: int
+) -> None:
     expected, _ = read_whole(fmt)
     batches = batches_of(fmt, batch_rows=batch_rows)
     assert pa.Table.from_batches(batches, expected.schema).equals(expected)
@@ -57,7 +63,9 @@ def test_batch_sizes(fmt: FileFormat, batch_rows: int, expected: list[int]) -> N
     assert [b.num_rows for b in batches_of(fmt, batch_rows=batch_rows)] == expected
 
 
-def test_schema_and_num_rows_are_what_the_metadata_reader_reports(fmt: FileFormat) -> None:
+def test_schema_and_num_rows_are_what_the_metadata_reader_reports(
+    fmt: FileFormat,
+) -> None:
     schema, expected_rows, _ = METADATA_READER_FUNCS[fmt](SAMPLES[fmt])
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt])
     assert reader.schema.equals(schema)
@@ -69,7 +77,9 @@ def test_reading_uses_no_thread(fmt: FileFormat) -> None:
     before = threading.active_count()
     during: list[int] = []
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt])
-    reader.read_batches(lambda batch: during.append(threading.active_count()), batch_rows=1)
+    reader.read_batches(
+        lambda batch: during.append(threading.active_count()), batch_rows=1
+    )
     assert during and all(count == before for count in during)
     assert threading.active_count() == before
 
@@ -104,7 +114,9 @@ def test_opening_reads_no_rows(fmt: FileFormat) -> None:
         {"columns": ["mynum"], "scan_and_narrow_types": True},
     ],
 )
-def test_options_match_the_whole_file_read(fmt: FileFormat, options: dict[str, t.Any]) -> None:
+def test_options_match_the_whole_file_read(
+    fmt: FileFormat, options: dict[str, t.Any]
+) -> None:
     expected, expected_metadata = read_whole(fmt, **options)
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt], **options)
     assert reader.read_all().equals(expected)
@@ -135,8 +147,12 @@ def test_a_stream_is_left_where_the_next_read_needs_it(fmt: FileFormat) -> None:
 
 def test_tagged_missings_keep_one_type_across_batches() -> None:
     """A batch with no tagged missing in it is still a struct, or the batches would not match."""
-    expected, _ = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta", preserve_user_missing=True)
-    reader = readstat_arrow.open_dta(DATA_DIR / "missing_test.dta", preserve_user_missing=True)
+    expected, _ = readstat_arrow.read_dta(
+        DATA_DIR / "missing_test.dta", preserve_user_missing=True
+    )
+    reader = readstat_arrow.open_dta(
+        DATA_DIR / "missing_test.dta", preserve_user_missing=True
+    )
     batches: list[pa.RecordBatch] = []
     reader.read_batches(batches.append, batch_rows=1)
     assert all(batch.schema.equals(reader.schema) for batch in batches)
@@ -190,7 +206,9 @@ def test_recoverable_parse_problems_become_warnings() -> None:
     of opening the file rather than out of reading it.
     """
     out = io.BytesIO()
-    readstat_arrow.write_sav(out, pa.table({"averylongvariablename": pa.array([1.0, 2.0])}))
+    readstat_arrow.write_sav(
+        out, pa.table({"averylongvariablename": pa.array([1.0, 2.0])})
+    )
     data = out.getvalue().replace(b"AVERYLON=averylong", b"AVERYLOX=averylong")
 
     with pytest.warns(readstat_arrow.ReadstatWarning, match="Failed to find AVERYLOX"):
@@ -271,7 +289,9 @@ def test_converts_to_parquet_a_batch_at_a_time(tmp_path: Path, fmt: FileFormat) 
     out = tmp_path / "out.parquet"
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt])
     with pq.ParquetWriter(out, reader.schema) as writer:
-        assert reader.read_batches(writer.write_batch, batch_rows=2) == expected.num_rows
+        assert (
+            reader.read_batches(writer.write_batch, batch_rows=2) == expected.num_rows
+        )
     written = pq.read_table(out)
     assert written.schema.names == expected.schema.names
     # Parquet has no large_string of its own; everything else survives as it was.
@@ -279,11 +299,15 @@ def test_converts_to_parquet_a_batch_at_a_time(tmp_path: Path, fmt: FileFormat) 
     assert pq.ParquetFile(out).num_row_groups == 3
 
 
-def test_converts_between_formats_a_batch_at_a_time(tmp_path: Path, fmt: FileFormat) -> None:
+def test_converts_between_formats_a_batch_at_a_time(
+    tmp_path: Path, fmt: FileFormat
+) -> None:
     """The batches go straight into the writers, so neither side holds the file."""
     other: FileFormat = "dta" if fmt == "sav" else "sav"
     out = tmp_path / f"converted.{other}"
-    writer_class = readstat_arrow.SavWriter if other == "sav" else readstat_arrow.DtaWriter
+    writer_class = (
+        readstat_arrow.SavWriter if other == "sav" else readstat_arrow.DtaWriter
+    )
     reader = OPEN_FUNCS[fmt](SAMPLES[fmt])
     assert reader.num_rows is not None
     with writer_class(out, reader.schema, reader.num_rows, reader.metadata) as writer:

@@ -15,16 +15,18 @@ from conftest import DATA_DIR, READER_FUNCS, SAMPLES, WRITER_FUNCS
 from readstat_arrow._cython import parser as _parser
 from readstat_arrow._formats import FileFormat
 
-SAMPLE_FILES = [path.name for path in sorted(DATA_DIR.glob("*.sav")) if path.name != "sample.zsav"] + [
-    path.name for path in sorted(DATA_DIR.glob("*.dta"))
-]
+SAMPLE_FILES = [
+    path.name for path in sorted(DATA_DIR.glob("*.sav")) if path.name != "sample.zsav"
+] + [path.name for path in sorted(DATA_DIR.glob("*.dta"))]
 
 
 @pytest.mark.parametrize("name", SAMPLE_FILES)
 def test_narrowing_never_changes_a_value(name: str) -> None:
     """Whatever width a column is read at, the values are the ones the file holds."""
     read = readstat_arrow.read_sav if name.endswith(".sav") else readstat_arrow.read_dta
-    with warnings.catch_warnings():  # a few samples hold problems ReadStat recovers from
+    with (
+        warnings.catch_warnings()
+    ):  # a few samples hold problems ReadStat recovers from
         warnings.simplefilter("ignore", readstat_arrow.ReadstatWarning)
         wide, _wide_metadata = read(DATA_DIR / name)
         narrow, _narrow_metadata = read(DATA_DIR / name, scan_and_narrow_types=True)
@@ -38,7 +40,12 @@ def test_narrowing_measures_only_what_it_reads(fmt: FileFormat, tmp_path: Path) 
     path = tmp_path / f"window.{fmt}"
     write(
         path,
-        pa.table({"x": pa.array([1.0, 2.0, 5000.0], pa.float64()), "y": pa.array([1.0, 2.0, 3.0])}),
+        pa.table(
+            {
+                "x": pa.array([1.0, 2.0, 5000.0], pa.float64()),
+                "y": pa.array([1.0, 2.0, 3.0]),
+            }
+        ),
     )
 
     whole, _ = read(path, scan_and_narrow_types=True)
@@ -51,7 +58,9 @@ def test_narrowing_measures_only_what_it_reads(fmt: FileFormat, tmp_path: Path) 
     assert window.column("x").to_pylist() == [1, 2]
 
 
-def test_float32_is_used_when_every_value_survives_it(fmt: FileFormat, tmp_path: Path) -> None:
+def test_float32_is_used_when_every_value_survives_it(
+    fmt: FileFormat, tmp_path: Path
+) -> None:
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     path = tmp_path / f"halves.{fmt}"
@@ -59,11 +68,15 @@ def test_float32_is_used_when_every_value_survives_it(fmt: FileFormat, tmp_path:
 
     table, _ = read(path, scan_and_narrow_types=True)
 
-    assert table.schema.field("x").type == pa.float32()  # not whole numbers, but exact in four bytes
+    assert (
+        table.schema.field("x").type == pa.float32()
+    )  # not whole numbers, but exact in four bytes
     assert table.column("x").to_pylist() == [0.5, -1.25, None]
 
 
-def test_int64_is_used_for_whole_numbers_too_large_for_int32(fmt: FileFormat, tmp_path: Path) -> None:
+def test_int64_is_used_for_whole_numbers_too_large_for_int32(
+    fmt: FileFormat, tmp_path: Path
+) -> None:
     read = READER_FUNCS[fmt]
     write = WRITER_FUNCS[fmt]
     path = tmp_path / f"large.{fmt}"
@@ -95,7 +108,9 @@ def test_narrowing_reads_a_file_object_from_where_it_started(fmt: FileFormat) ->
 def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
     wide, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav")
 
-    narrow, metadata = readstat_arrow.read_sav(DATA_DIR / "sample.sav", scan_and_narrow_types=True)
+    narrow, metadata = readstat_arrow.read_sav(
+        DATA_DIR / "sample.sav", scan_and_narrow_types=True
+    )
 
     assert narrow.schema == pa.schema(
         {
@@ -116,18 +131,25 @@ def test_narrowing_reads_a_sav_at_the_width_its_values_need() -> None:
     assert replace(metadata, value_labels={}) == replace(wide_metadata, value_labels={})
     assert metadata.value_labels["mylabl"] is not None
     male, female = metadata.value_labels["mylabl"]
-    assert (male, female) == ({"value": 1, "label": "Male"}, {"value": 2, "label": "Female"})
+    assert (male, female) == (
+        {"value": 1, "label": "Male"},
+        {"value": 2, "label": "Female"},
+    )
     # ... and 1.0 == 1, so the type is what the assertions above cannot say.
     assert isinstance(male["value"], int)
     assert isinstance(female["value"], int)
 
     assert wide_metadata.value_labels["mylabl"] is not None
-    wide_male, wide_female = wide_metadata.value_labels["mylabl"]  # the .sav stores doubles
+    wide_male, wide_female = wide_metadata.value_labels[
+        "mylabl"
+    ]  # the .sav stores doubles
     assert isinstance(wide_male["value"], float)
     assert isinstance(wide_female["value"], float)
 
 
-def test_narrowing_leaves_the_codes_of_a_column_it_did_not_narrow_alone(tmp_path: Path) -> None:
+def test_narrowing_leaves_the_codes_of_a_column_it_did_not_narrow_alone(
+    tmp_path: Path,
+) -> None:
     """A label on a column that stays a double keeps its float code."""
     path = tmp_path / "mixed.sav"
     readstat_arrow.write_sav(
@@ -147,16 +169,22 @@ def test_narrowing_leaves_the_codes_of_a_column_it_did_not_narrow_alone(tmp_path
 
 def test_sav_narrowing_leaves_a_column_alone_when_nothing_narrower_holds_it() -> None:
     stored, _, _ = readstat_arrow.read_sav_metadata(DATA_DIR / "test_width.sav")
-    narrow, _ = readstat_arrow.read_sav(DATA_DIR / "test_width.sav", scan_and_narrow_types=True)
+    narrow, _ = readstat_arrow.read_sav(
+        DATA_DIR / "test_width.sav", scan_and_narrow_types=True
+    )
 
     assert stored.field("ResponseId").type == pa.large_string()
     assert narrow.schema.field("ResponseId").type == pa.large_string()
     assert stored.field("Duration__in_seconds_").type == pa.float64()
-    assert narrow.schema.field("Duration__in_seconds_").type == pa.int16()  # 884 to 2611 seconds
+    assert (
+        narrow.schema.field("Duration__in_seconds_").type == pa.int16()
+    )  # 884 to 2611 seconds
 
 
 def test_sav_narrowed_columns_keep_their_nulls() -> None:
-    table, _ = readstat_arrow.read_sav(DATA_DIR / "sample_missing.sav", scan_and_narrow_types=True)
+    table, _ = readstat_arrow.read_sav(
+        DATA_DIR / "sample_missing.sav", scan_and_narrow_types=True
+    )
 
     assert table.schema.field("mylabl").type == pa.int8()
     assert table.column("mylabl").to_pylist() == [1, 2, 1, 2, 1, None, None]
@@ -165,13 +193,17 @@ def test_sav_narrowed_columns_keep_their_nulls() -> None:
 def test_sav_nulls_are_left_out_of_the_range_a_type_has_to_cover() -> None:
     # mydate's last row is missing; the four that are there are whole seconds far
     # past int32, and the null costs nothing.
-    table, _ = readstat_arrow.read_sav(DATA_DIR / "sample.sav", scan_and_narrow_types=True)
+    table, _ = readstat_arrow.read_sav(
+        DATA_DIR / "sample.sav", scan_and_narrow_types=True
+    )
 
     assert table.schema.field("mydate").type == pa.date32()
     assert table.column("mydate")[4].as_py() is None
 
 
-def test_sav_narrowing_sees_user_missing_values_when_the_read_keeps_them(tmp_path: Path) -> None:
+def test_sav_narrowing_sees_user_missing_values_when_the_read_keeps_them(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "declared.sav"
     readstat_arrow.write_sav(
         path,
@@ -180,19 +212,31 @@ def test_sav_narrowing_sees_user_missing_values_when_the_read_keeps_them(tmp_pat
     )
 
     default, _ = readstat_arrow.read_sav(path, scan_and_narrow_types=True)
-    preserved, _ = readstat_arrow.read_sav(path, scan_and_narrow_types=True, preserve_user_missing=True)
+    preserved, _ = readstat_arrow.read_sav(
+        path, scan_and_narrow_types=True, preserve_user_missing=True
+    )
 
-    assert default.schema.field("x").type == pa.int8()  # 999 reads as a null and bounds nothing
-    assert preserved.schema.field("x").type == pa.int16()  # kept, it needs the second byte
+    assert (
+        default.schema.field("x").type == pa.int8()
+    )  # 999 reads as a null and bounds nothing
+    assert (
+        preserved.schema.field("x").type == pa.int16()
+    )  # kept, it needs the second byte
     assert preserved.column("x").to_pylist() == [1, 2, 999]
 
 
 def test_narrowing_on_a_dta_whose_types_are_already_narrow() -> None:
     stored, _, _ = readstat_arrow.read_dta_metadata(DATA_DIR / "sample.dta")
-    narrow, _ = readstat_arrow.read_dta(DATA_DIR / "sample.dta", scan_and_narrow_types=True)
+    narrow, _ = readstat_arrow.read_dta(
+        DATA_DIR / "sample.dta", scan_and_narrow_types=True
+    )
 
-    assert stored.field("mylabl").type == pa.int8()  # Stata stores small integers as int8
-    assert narrow.schema.field("mylabl").type == pa.int8()  # so there is nothing to narrow
+    assert (
+        stored.field("mylabl").type == pa.int8()
+    )  # Stata stores small integers as int8
+    assert (
+        narrow.schema.field("mylabl").type == pa.int8()
+    )  # so there is nothing to narrow
     assert narrow.schema.field("mynum").type == pa.float64()
 
 
@@ -207,13 +251,17 @@ def test_dta_narrowing_wraps_tagged_missings_around_the_narrowed_value() -> None
 
 
 def test_dta_column_of_nothing_but_nulls_narrows_to_one_byte_a_row() -> None:
-    table, _ = readstat_arrow.read_dta(DATA_DIR / "missing_test.dta", scan_and_narrow_types=True)
+    table, _ = readstat_arrow.read_dta(
+        DATA_DIR / "missing_test.dta", scan_and_narrow_types=True
+    )
 
     assert table.schema.field("var1").type == pa.int8()
     assert table.column("var1").to_pylist() == [None]
 
 
-def test_sav_width_that_cannot_hold_a_value_is_refused_by_the_parser(tmp_path: Path) -> None:
+def test_sav_width_that_cannot_hold_a_value_is_refused_by_the_parser(
+    tmp_path: Path,
+) -> None:
     """The guard behind narrowing, which no measured width can trip.
 
     ReadStat converts a double to a narrower type by casting, which wraps around
@@ -222,14 +270,20 @@ def test_sav_width_that_cannot_hold_a_value_is_refused_by_the_parser(tmp_path: P
     uses are measured from the very rows it then reads.
     """
     path = tmp_path / "thousands.sav"
-    readstat_arrow.write_sav(path, pa.table({"x": pa.array([1.0, 1000.0], pa.float64())}))
+    readstat_arrow.write_sav(
+        path, pa.table({"x": pa.array([1.0, 1000.0], pa.float64())})
+    )
     encoded = str(path).encode()
 
-    with pytest.raises(readstat_arrow.ReadstatError, match=r"x: row 1 holds 1000.0.*out of range.*int8"):
+    with pytest.raises(
+        readstat_arrow.ReadstatError, match=r"x: row 1 holds 1000.0.*out of range.*int8"
+    ):
         _parser.parse(encoded, "sav", types={"x": pa.int8()})
 
     with pytest.raises(readstat_arrow.ReadstatError, match=r"not a whole number.*int8"):
-        _parser.parse(str(DATA_DIR / "sample.sav").encode(), "sav", types={"mynum": pa.int8()})
+        _parser.parse(
+            str(DATA_DIR / "sample.sav").encode(), "sav", types={"mynum": pa.int8()}
+        )
 
     with pytest.raises(readstat_arrow.ReadstatError, match=r"out of range.*float"):
         huge = tmp_path / "huge.sav"

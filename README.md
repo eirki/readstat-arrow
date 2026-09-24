@@ -434,7 +434,7 @@ git clone <repo-url>
 cd readstat-arrow
 uv sync            # builds the Cython extension into .venv
 uv run coverage run -m pytest && uv run coverage report || uv run  coverage html
-uv run ruff check . && uv run ruff format --check . && uv run mypy
+uv run isort --check-only . && uv run black --check . && uv run mypy
 uv run pre-commit install    # optional: run those same checks on every commit
 ```
 
@@ -451,7 +451,7 @@ sources change (see `[tool.uv] cache-keys` in `pyproject.toml`).
 ## Layout
 
 ```
-pyproject.toml            project metadata, deps, tool config (uv/ruff/mypy/pytest)
+pyproject.toml            project metadata, deps, tool config (uv/black/isort/mypy/pytest)
 setup.py                  Cython extension definition (compiles ReadStat in)
 vendor/ReadStat/          git submodule
 src/readstat_arrow/
