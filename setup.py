@@ -34,7 +34,8 @@ _EXCLUDED_FILES = {
 readstat_sources = sorted(
     str(p.relative_to(ROOT))
     for p in READSTAT_SRC.rglob("*.c")
-    if not (set(p.relative_to(READSTAT_SRC).parts[:-1]) & _EXCLUDED_DIRS) and p.name not in _EXCLUDED_FILES
+    if not (set(p.relative_to(READSTAT_SRC).parts[:-1]) & _EXCLUDED_DIRS)
+    and p.name not in _EXCLUDED_FILES
 )
 
 # No zlib: .zsav (zlib-compressed .sav) is out of scope, so ReadStat is built
@@ -89,5 +90,5 @@ setup(
         language_level=3,
         include_path=[str(ROOT / "src")],
         compiler_directives={"embedsignature": True},
-    ),
+    )
 )
