@@ -146,3 +146,110 @@ def test_sav_merge_prefers_self_on_overlap() -> None:
     assert merged.variable_labels["mychar"] == "character"  # self's version, not "other"
     assert merged.variable_labels["extra"] == "Extra"  # ... but other's own entries come along
     assert metadata.merge(metadata) == replace(metadata, notes=[*metadata.notes, *metadata.notes])
+
+
+def test_metadata_accepts_dict_with_narrower_value_types() -> None:
+    """Metadata should accept dict[str, str] where Mapping[str, str | None] is
+    expected. Also type checker should accept this without errors."""
+    # formats: dict[str, str] → Mapping[str, str | None]
+    my_formats: dict[str, str] = {"x": "F8.2", "y": "F4.0"}
+    metadata = Metadata(formats=my_formats)
+    assert metadata.formats == {"x": "F8.2", "y": "F4.0"}
+
+    # variable_labels: dict[str, str] → Mapping[str, str | None]
+    my_labels: dict[str, str] = {"q1": "Question 1", "q2": "Question 2"}
+    metadata = Metadata(variable_labels=my_labels)
+    assert metadata.variable_labels == {"q1": "Question 1", "q2": "Question 2"}
+
+    # storage_widths: dict[str, int] → Mapping[str, int | None]
+    my_storage_widths: dict[str, int] = {"a": 10, "b": 20}
+    metadata = Metadata(storage_widths=my_storage_widths)
+    assert metadata.storage_widths == {"a": 10, "b": 20}
+
+    # display_widths: dict[str, int] → Mapping[str, int | None]
+    my_display_widths: dict[str, int] = {"a": 10, "b": 20}
+    metadata = Metadata(display_widths=my_display_widths)
+    assert metadata.display_widths == {"a": 10, "b": 20}
+
+
+def test_metadata_accepts_narrower_value_label_types() -> None:
+    """Metadata should accept dict[str, list[Code]] where value_labels may have
+    None values. Also type checker should accept this without errors."""
+    codes: list[Code] = [{"value": 1, "label": "Yes"}, {"value": 2, "label": "No"}]
+    my_value_labels: dict[str, list[Code]] = {"q1": codes, "q2": codes}
+    metadata = Metadata(value_labels=my_value_labels)
+
+    assert metadata.value_labels["q1"] == codes
+    assert metadata.value_labels["q2"] == codes
+
+
+def test_metadata_missing_values_with_int_sequence() -> None:
+    """Missing values should accept Sequence[int] where Sequence[Value] is
+    expected. Also type checker should accept this without errors."""
+    int_values_1: list[int] = [9, 99, 999]
+    int_values_2: list[int] = [7, 8]
+    my_missing_values: dict[str, readstat_arrow.MissingValues] = {
+        "x": {"values": int_values_1},
+        "y": {"values": int_values_2},
+    }
+    metadata = Metadata(missing_values=my_missing_values)
+
+    assert metadata.missing_values["x"] == {"values": [9, 99, 999]}
+    assert metadata.missing_values["y"] == {"values": [7, 8]}
+
+
+def test_metadata_missing_values_with_float_sequence() -> None:
+    """Missing values should accept Sequence[float]. Also type checker should
+    accept this without errors."""
+    float_values_1: list[float] = [9.0, 99.0, 999.0]
+    float_values_2: list[float] = [7.5]
+    my_missing_values: dict[str, readstat_arrow.MissingValues] = {
+        "a": {"values": float_values_1},
+        "b": {"values": float_values_2},
+    }
+    metadata = Metadata(missing_values=my_missing_values)
+
+    assert metadata.missing_values["a"] == {"values": [9.0, 99.0, 999.0]}
+    assert metadata.missing_values["b"] == {"values": [7.5]}
+
+
+def test_metadata_missing_values_with_string_sequence() -> None:
+    """Missing values should accept Sequence[str] for Stata's tagged missings.
+    Also type checker should accept this without errors."""
+    string_values: list[str] = ["a", "b", "c"]
+    my_missing_values: dict[str, readstat_arrow.MissingValues] = {
+        "x": {"values": string_values},
+    }
+    metadata = Metadata(missing_values=my_missing_values)
+
+    assert metadata.missing_values["x"] == {"values": ["a", "b", "c"]}
+
+
+def test_metadata_missing_values_with_maybe_mixed_sequence() -> None:
+    """Missing values should accept Sequence[int] where Sequence[Value] is
+    expected. Also type checker should accept this without errors."""
+    int_values_1: list[int] | list[str] = [9, 99, 999]
+    my_missing_values: dict[str, readstat_arrow.MissingValues] = {
+        "x": {"values": int_values_1},
+    }
+    metadata = Metadata(missing_values=my_missing_values)
+
+    assert metadata.missing_values["x"] == {"values": [9, 99, 999]}
+
+
+def test_metadata_missing_range() -> None:
+    """Missing ranges should accept narrower value types. Also type checker
+    should accept this without errors."""
+    int_range: readstat_arrow.MissingRange = {"lo": -999, "hi": 0}
+    float_range: readstat_arrow.MissingRange = {"lo": -999.0, "hi": 0.0}
+    int_range_with_value: readstat_arrow.MissingRange = {"lo": -999, "hi": 0, "value": 999}
+    my_missing_values: dict[str, readstat_arrow.Missingness] = {
+        "x": int_range,
+        "y": float_range,
+        "z": int_range_with_value,
+    }
+    metadata = Metadata(missing_values=my_missing_values)
+
+    assert metadata.missing_values["x"] == {"lo": -999, "hi": 0}
+    assert metadata.missing_values["y"] == {"lo": -999.0, "hi": 0.0}
+    assert metadata.missing_values["z"] == {"lo": -999, "hi": 0, "value": 999}

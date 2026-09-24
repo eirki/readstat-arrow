@@ -27,7 +27,7 @@ class MissingValues(t.TypedDict):
     SPSS's ``MISSING VALUES q (7, 8, 9)``.
     """
 
-    values: list[Value]
+    values: Sequence[Value]
 
 
 class MissingRange(t.TypedDict):
