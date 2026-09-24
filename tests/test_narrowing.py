@@ -138,7 +138,11 @@ def test_narrowing_leaves_the_codes_of_a_column_it_did_not_narrow_alone(tmp_path
 
     _table, metadata = readstat_arrow.read_sav(path, scan_and_narrow_types=True)
 
-    assert metadata.value_labels["n"] == [{"value": 1.5, "label": "half"}]
+    labels = metadata.value_labels["n"]
+    assert labels is not None
+    (half,) = labels
+    assert half == {"value": 1.5, "label": "half"}
+    assert isinstance(half["value"], float)
 
 
 def test_sav_narrowing_leaves_a_column_alone_when_nothing_narrower_holds_it() -> None:

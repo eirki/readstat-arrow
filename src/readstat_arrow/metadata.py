@@ -92,14 +92,14 @@ class Metadata:
     built by dict comprehension need not filter its empty entries out.
     """
 
-    variable_labels: dict[str, str | None] = field(default_factory=dict)
-    value_labels: dict[str, list[Code] | None] = field(default_factory=dict)  # in the file's order
-    formats: dict[str, str | None] = field(default_factory=dict)  # display format, "F8.2" / "%td"
-    storage_widths: dict[str, int | None] = field(default_factory=dict)  # declared byte width
-    display_widths: dict[str, int | None] = field(default_factory=dict)  # columns the software shows
-    measures: dict[str, Measure | None] = field(default_factory=dict)
-    alignments: dict[str, Alignment | None] = field(default_factory=dict)
-    missing_values: dict[str, Missingness | None] = field(default_factory=dict)
+    variable_labels: Mapping[str, str | None] = field(default_factory=dict)
+    value_labels: Mapping[str, list[Code] | None] = field(default_factory=dict)  # in the file's order
+    formats: Mapping[str, str | None] = field(default_factory=dict)  # display format, "F8.2" / "%td"
+    storage_widths: Mapping[str, int | None] = field(default_factory=dict)  # declared byte width
+    display_widths: Mapping[str, int | None] = field(default_factory=dict)  # columns the software shows
+    measures: Mapping[str, Measure | None] = field(default_factory=dict)
+    alignments: Mapping[str, Alignment | None] = field(default_factory=dict)
+    missing_values: Mapping[str, Missingness | None] = field(default_factory=dict)
 
     file_label: str | None = None
     notes: list[str] = field(default_factory=list)

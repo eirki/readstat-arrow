@@ -49,15 +49,6 @@ def test_mappings_hold_only_what_the_file_declares(fmt: FileFormat) -> None:
     assert "mychar" not in metadata.value_labels  # ... and an undeclared name is simply absent
 
 
-def test_describing_a_variable_is_ordinary_dictionary_work() -> None:
-    metadata = Metadata()
-    metadata.variable_labels["agree"] = "Agrees with statement"
-    metadata.value_labels["agree"] = [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]
-
-    assert metadata.variable_labels == {"agree": "Agrees with statement"}
-    assert metadata.value_labels == {"agree": [{"value": 0, "label": "No"}, {"value": 1, "label": "Yes"}]}
-
-
 def test_variables_do_not_share_label_lists(fmt: FileFormat) -> None:
     """Variables that share one label set in the file come back with independent lists."""
     read_metadata = METADATA_READER_FUNCS[fmt]
