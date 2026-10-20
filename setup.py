@@ -10,26 +10,17 @@ ROOT = Path(__file__).parent
 READSTAT_SRC = ROOT / "vendor" / "ReadStat" / "src"
 CYTHON_DIR = ROOT / "src" / "readstat_arrow" / "_cython"
 WIN_ICONV_DIR = ROOT / "vendor" / "win-iconv"
+ZLIB_DIR = ROOT / "vendor" / "zlib"
 
 
-# ReadStat sources: the core plus the SPSS (.sav) and Stata (.dta) modules.
+# ReadStat sources: the core plus the SPSS (.sav, .zsav) and Stata (.dta) modules.
 # SAS and SPSS-portable support is left out until we need it.
-#
-# The zsav translation units go too: they call deflate()/uncompress() with no
-# #if HAVE_ZLIB guard of their own, so compiling them into a build that does not
-# link zlib (see below) leaves those symbols undefined in the .so.  Lazy binding
-# hides that on some interpreters and fails the import outright on others.
-# Their callers in readstat_sav_{read,write}.c are all inside #if HAVE_ZLIB, so
-# dropping the files costs nothing here.
 _EXCLUDED_DIRS = {"bin", "test", "fuzz", "sas"}
 _EXCLUDED_FILES = {
     "readstat_por.c",
     "readstat_por_parse.c",
     "readstat_por_read.c",
     "readstat_por_write.c",
-    "readstat_zsav_compress.c",
-    "readstat_zsav_read.c",
-    "readstat_zsav_write.c",
 }
 readstat_sources = sorted(
     str(p.relative_to(ROOT))
@@ -38,10 +29,18 @@ readstat_sources = sorted(
     and p.name not in _EXCLUDED_FILES
 )
 
-# No zlib: .zsav (zlib-compressed .sav) is out of scope, so ReadStat is built
-# without HAVE_ZLIB and reports such files as "unsupported compression".
+# zlib, for .zsav (zlib-compressed .sav), is compiled in from vendor/zlib on
+# every platform.  Only the sources behind deflate/inflate/uncompress are built;
+# the gz* file API is unused.
 #
-# iconv, on the other hand, is not optional: ReadStat's readstat_iconv.h includes
+# Z_PREFIX renames every zlib symbol to z_*, through macros in zconf.h that
+# ReadStat picks up by including <zlib.h>.  Without it our deflate() would be an
+# exported symbol in the .so and could be resolved against - or shadow - the
+# system libz that the interpreter's own zlib module has already loaded.
+zlib_sources = sorted(str(p.relative_to(ROOT)) for p in ZLIB_DIR.glob("*.c"))
+zlib_macros = [("HAVE_ZLIB", "1"), ("Z_PREFIX", "1")]
+
+# iconv is needed too: ReadStat's readstat_iconv.h includes
 # <iconv.h> unconditionally.  glibc bundles an implementation, macOS ships one in
 # the SDK, and MSVC has none at all -- hence the vendored win_iconv on Windows.
 if sys.platform == "win32":
@@ -74,11 +73,12 @@ def extension(module: str) -> Extension:
         sources=[
             str((CYTHON_DIR / f"{module}.py").relative_to(ROOT)),
             *readstat_sources,
+            *zlib_sources,
             *iconv_sources,
         ],
-        include_dirs=[str(READSTAT_SRC), *iconv_include_dirs],
+        include_dirs=[str(READSTAT_SRC), str(ZLIB_DIR), *iconv_include_dirs],
         libraries=libraries,
-        define_macros=define_macros,
+        define_macros=[*zlib_macros, *define_macros],
     )
 
 

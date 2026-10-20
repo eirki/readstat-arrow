@@ -101,6 +101,16 @@ def test_read_sample(fmt: FileFormat) -> None:
         t.assert_never(fmt)
 
 
+def test_read_zsav() -> None:
+    """A zlib-compressed .sav reads like the uncompressed copy of the same data."""
+    table, metadata = readstat_arrow.read_sav(DATA_DIR / "sample.zsav")
+    expected, expected_metadata = readstat_arrow.read_sav(SAMPLES["sav"])
+
+    assert table.equals(expected)
+    assert metadata.variable_labels == expected_metadata.variable_labels
+    assert metadata.value_labels == expected_metadata.value_labels
+
+
 def test_column_selection(fmt: FileFormat) -> None:
     read = READER_FUNCS[fmt]
     table, metadata = read(SAMPLES[fmt], columns=["mynum", "mychar"])

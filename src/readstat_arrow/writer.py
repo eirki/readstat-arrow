@@ -69,7 +69,14 @@ from readstat_arrow._formats import (
 from readstat_arrow.errors import ReadstatWarning
 from readstat_arrow.metadata import Metadata, Missingness, Value
 
-__all__ = ["DtaWriter", "SavWriter", "TextLimitPolicy", "write_dta", "write_sav"]
+__all__ = [
+    "DtaWriter",
+    "SavCompression",
+    "SavWriter",
+    "TextLimitPolicy",
+    "write_dta",
+    "write_sav",
+]
 
 PathLike = str | os.PathLike[str]
 
@@ -135,6 +142,12 @@ _LIMITS: FormatMap[dict[str, _Limit]] = {
 # What a writer does with text or a string column that is over the limit.
 TextLimitPolicy = t.Literal["error", "truncate"]
 
+# How a .sav file's rows are stored: as they are, with SPSS's bytecode
+# compression, or bytecode compressed again with zlib (a .zsav file). Each level
+# includes the one before it. Values are ReadStat's readstat_compress_t.
+SavCompression = t.Literal["none", "rows", "zlib"]
+_COMPRESSION: dict[str, int] = {"none": 0, "rows": 1, "zlib": 2}
+
 # Stata keys value labels with an int32, whatever the labelled variable's type,
 # and reserves the top of that range for missing values - so the keys it can
 # actually hold are the ones a `long` can (see _STATA_INT_RANGES). A missing
@@ -187,12 +200,17 @@ class _Writer:
         variable_ranges: Mapping[str, tuple[int, int]] | None = None,
         rename_invalid_names: bool = False,
         on_text_limits_exceeded: TextLimitPolicy = "error",
+        compression: SavCompression = "none",
     ) -> None:
         if num_rows < 0:
             raise ValueError("num_rows must be non-negative")
         if on_text_limits_exceeded not in ("error", "truncate"):
             raise ValueError(
                 f"on_text_limits_exceeded must be 'error' or 'truncate', got {on_text_limits_exceeded!r}"
+            )
+        if compression not in _COMPRESSION:
+            raise ValueError(
+                f"compression must be 'none', 'rows' or 'zlib', got {compression!r}"
             )
         self.on_text_limits_exceeded = on_text_limits_exceeded
         metadata = metadata if metadata is not None else Metadata()
@@ -267,6 +285,7 @@ class _Writer:
                 label_sets,
                 file_label,
                 notes,
+                _COMPRESSION[compression],
             )
         except BaseException:  # pragma: no cover
             if self._owns_file:
@@ -365,6 +384,14 @@ class SavWriter(_Writer):
         256 bytes of variable label, 120 of value label, 64 of file label, 80 per
         note, and 32 767 in a string value. The module docstring has the same for
         Stata, and why each number is what it is.
+    compression:
+        ``"none"``, the default, stores every row at full width. ``"rows"``
+        applies SPSS's bytecode compression (what SPSS writes when told
+        ``/COMPRESSED``), which shrinks small integers, system-missing values and
+        blank-padded strings to a byte each. ``"zlib"`` applies the same bytecode
+        compression and then deflates the result, making a ``.zsav`` file
+        (``/ZCOMPRESSED``); SPSS reads these from version 21 on. The file's
+        name is up to you: the format is the same whatever the extension.
 
     A string variable is written ``storage_width`` bytes wide, or 255 when the
     variable does not say. A value longer than its column's width raises
@@ -386,6 +413,7 @@ class SavWriter(_Writer):
         *,
         rename_invalid_names: bool = False,
         on_text_limits_exceeded: TextLimitPolicy = "error",
+        compression: SavCompression = "none",
     ) -> None:
         super().__init__(
             where,
@@ -394,6 +422,7 @@ class SavWriter(_Writer):
             metadata,
             rename_invalid_names=rename_invalid_names,
             on_text_limits_exceeded=on_text_limits_exceeded,
+            compression=compression,
         )
 
 
@@ -480,6 +509,7 @@ def write_sav(
     *,
     rename_invalid_names: bool = False,
     on_text_limits_exceeded: TextLimitPolicy = "error",
+    compression: SavCompression = "none",
 ) -> None:
     """Write ``table`` as an SPSS ``.sav`` file, in one call.
 
@@ -502,6 +532,9 @@ def write_sav(
         ``"error"`` to refuse text SPSS cannot hold, ``"truncate"`` to cut it to
         the longest prefix that fits and warn. See :class:`SavWriter` for the
         limits, and the module docstring for both formats' side by side.
+    compression:
+        ``"none"``, ``"rows"`` (SPSS bytecode compression) or ``"zlib"``
+        (bytecode, then deflate: a ``.zsav`` file); see :class:`SavWriter`.
     """
     metadata = _with_measured_widths(table, metadata)
     with SavWriter(
@@ -511,6 +544,7 @@ def write_sav(
         metadata,
         rename_invalid_names=rename_invalid_names,
         on_text_limits_exceeded=on_text_limits_exceeded,
+        compression=compression,
     ) as writer:
         writer.write_table(table)
 

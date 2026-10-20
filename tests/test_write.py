@@ -805,6 +805,97 @@ def test_write_sav_roundtrip() -> None:
     assert back_metadata.value_labels == metadata.value_labels
 
 
+# The .sav header's compression field: an int32 at byte 72, 0 for none, 1 for
+# bytecode, 2 for zlib. A .zsav file also starts $FL3 rather than $FL2.
+SAV_COMPRESSION_OFFSET = 72
+
+
+def test_sav_is_uncompressed_by_default() -> None:
+    table, metadata = _survey()
+    out = io.BytesIO()
+
+    readstat_arrow.write_sav(out, table, metadata)
+
+    flag = out.getvalue()[SAV_COMPRESSION_OFFSET : SAV_COMPRESSION_OFFSET + 4]
+    assert int.from_bytes(flag, "little") == 0
+
+
+def test_sav_rows_compression_roundtrip() -> None:
+    # Small whole numbers and blank strings each shrink to a one-byte code, but
+    # every row starts a fresh 8-byte block of codes, so it takes several columns
+    # for the file to come out smaller.
+    table = pa.table(
+        {
+            **{
+                f"n{j}": pa.array([(i + j) % 7 for i in range(1_000)], pa.float64())
+                for j in range(6)
+            },
+            "s": pa.array(["", "x"] * 500, pa.large_string()),
+        }
+    )
+    plain = io.BytesIO()
+    compressed = io.BytesIO()
+
+    readstat_arrow.write_sav(plain, table)
+    readstat_arrow.write_sav(compressed, table, compression="rows")
+    compressed.seek(0)
+    back, _ = readstat_arrow.read_sav(compressed)
+
+    flag = compressed.getvalue()[SAV_COMPRESSION_OFFSET : SAV_COMPRESSION_OFFSET + 4]
+    assert int.from_bytes(flag, "little") == 1
+    assert len(compressed.getvalue()) < len(plain.getvalue())
+    assert back.equals(table)
+
+
+def test_sav_zlib_compression_roundtrip() -> None:
+    table = pa.table(
+        {
+            "n": pa.array([float(i % 7) for i in range(10_000)]),
+            "s": pa.array(["the same text"] * 10_000, pa.large_string()),
+        }
+    )
+    bytecode = io.BytesIO()
+    zlib = io.BytesIO()
+
+    readstat_arrow.write_sav(bytecode, table, compression="rows")
+    readstat_arrow.write_sav(zlib, table, compression="zlib")
+    zlib.seek(0)
+    back, _ = readstat_arrow.read_sav(zlib)
+
+    flag = zlib.getvalue()[SAV_COMPRESSION_OFFSET : SAV_COMPRESSION_OFFSET + 4]
+    assert zlib.getvalue()[:4] == b"$FL3"
+    assert int.from_bytes(flag, "little") == 2
+    assert len(zlib.getvalue()) < len(bytecode.getvalue())
+    assert back.equals(table)
+
+
+@pytest.mark.parametrize("compression", ["rows", "zlib"])
+def test_sav_writer_compresses_in_batches(
+    compression: readstat_arrow.SavCompression,
+) -> None:
+    table, metadata = _survey()
+    out = io.BytesIO()
+
+    with readstat_arrow.SavWriter(
+        out, table.schema, table.num_rows, metadata, compression=compression
+    ) as writer:
+        writer.write_table(table.slice(0, 2))
+        writer.write_table(table.slice(2))
+    out.seek(0)
+    back, _ = readstat_arrow.read_sav(out)
+
+    assert back.equals(table)
+
+
+def test_sav_writer_rejects_an_unknown_compression() -> None:
+    schema = pa.schema([pa.field("v", pa.float64())])
+
+    with pytest.raises(
+        ValueError, match="compression must be 'none', 'rows' or 'zlib'"
+    ):
+        readstat_arrow.SavWriter(io.BytesIO(), schema, 1, compression="binary")  # type: ignore[arg-type]
+
+
 def test_write_dta_roundtrip() -> None:
     table, metadata = _panel()
     out = io.BytesIO()

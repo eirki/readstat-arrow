@@ -37,6 +37,7 @@ from cython.cimports.readstat_arrow._cython.readstat import (
     readstat_begin_row,
     readstat_begin_writing_dta,
     readstat_begin_writing_sav,
+    readstat_compress_t,
     readstat_end_row,
     readstat_end_writing,
     readstat_error_message,
@@ -69,6 +70,7 @@ from cython.cimports.readstat_arrow._cython.readstat import (
     readstat_variable_t,
     readstat_writer_free,
     readstat_writer_init,
+    readstat_writer_set_compression,
     readstat_writer_set_file_label,
     readstat_writer_t,
 )
@@ -332,6 +334,7 @@ class Writer:
         label_sets: list,
         file_label: str | None,
         notes: list,
+        compression: int,
     ):
         self._writer = cython.NULL
         self._columns = []
@@ -434,6 +437,11 @@ class Writer:
             _check(readstat_writer_set_file_label(w, _c_str(file_label)))
         for note in notes:
             readstat_add_note(w, _c_str(note))
+        _check(
+            readstat_writer_set_compression(
+                w, cython.cast(readstat_compress_t, compression)
+            )
+        )
 
         vctx: cython.p_void = cython.cast(cython.p_void, self._sink)
         if file_format == "sav":

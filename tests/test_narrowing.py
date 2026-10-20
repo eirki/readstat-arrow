@@ -16,14 +16,15 @@ from readstat_arrow._cython import parser as _parser
 from readstat_arrow._formats import FileFormat
 
 SAMPLE_FILES = [
-    path.name for path in sorted(DATA_DIR.glob("*.sav")) if path.name != "sample.zsav"
+    path.name
+    for path in sorted(DATA_DIR.glob("*.sav")) + sorted(DATA_DIR.glob("*.zsav"))
 ] + [path.name for path in sorted(DATA_DIR.glob("*.dta"))]
 
 
 @pytest.mark.parametrize("name", SAMPLE_FILES)
 def test_narrowing_never_changes_a_value(name: str) -> None:
     """Whatever width a column is read at, the values are the ones the file holds."""
-    read = readstat_arrow.read_sav if name.endswith(".sav") else readstat_arrow.read_dta
+    read = readstat_arrow.read_dta if name.endswith(".dta") else readstat_arrow.read_sav
     with (
         warnings.catch_warnings()
     ):  # a few samples hold problems ReadStat recovers from

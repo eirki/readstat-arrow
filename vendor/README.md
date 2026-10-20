@@ -54,3 +54,37 @@ To re-sync:
     rm -rf /tmp/win-iconv
 
     # update the Commit lines above
+
+## zlib
+
+Upstream: https://github.com/madler/zlib
+Tag:      v1.3.2
+Commit:   da607da739fa6047df13e66a2af6b8bec7c2a498
+
+Copied verbatim from upstream; no local patches.
+
+Needed for .zsav (zlib-compressed SPSS) files, and compiled into the extension
+on every platform rather than linked from the system: MSVC ships no zlib, and
+a vendored copy keeps the wheels alike.  zlib's licence is permissive, so it
+adds no obligations beyond keeping the notice.  See setup.py for the
+compile-time defines it needs.
+
+Only the sources behind the in-memory deflate/inflate/(un)compress API are
+used.  The gz* file API (gzlib.c, gzread.c, gzwrite.c, gzclose.c) is left out;
+gzguts.h comes along all the same because zutil.c includes it.  Everything
+else upstream - build systems, contrib/, examples, tests, docs - is left out.
+
+To re-sync:
+    git clone --branch <tag> https://github.com/madler/zlib /tmp/zlib
+
+    git -C /tmp/zlib log --format="%H" -1
+
+    rm -rf vendor/zlib && \
+    mkdir vendor/zlib && \
+    cp /tmp/zlib/LICENSE /tmp/zlib/README \
+       /tmp/zlib/{adler32,compress,crc32,deflate,infback,inffast,inflate,inftrees,trees,uncompr,zutil}.c \
+       /tmp/zlib/{crc32,deflate,gzguts,inffast,inffixed,inflate,inftrees,trees,zconf,zlib,zutil}.h \
+       vendor/zlib/ && \
+    rm -rf /tmp/zlib
+
+    # update the Tag and Commit lines above

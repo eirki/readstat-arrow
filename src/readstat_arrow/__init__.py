@@ -33,6 +33,7 @@ from readstat_arrow.reader import (
 )
 from readstat_arrow.writer import (
     DtaWriter,
+    SavCompression,
     SavWriter,
     TextLimitPolicy,
     write_dta,
@@ -51,6 +52,7 @@ __all__ = [
     "Missingness",
     "ReadstatError",
     "ReadstatWarning",
+    "SavCompression",
     "SavStreamingReader",
     "SavWriter",
     "TextLimitPolicy",
